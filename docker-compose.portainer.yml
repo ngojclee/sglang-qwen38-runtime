@@ -1,48 +1,67 @@
 version: "3.8"
 
+networks:
+  vast-net:
+    driver: bridge
+
 services:
-  # ============================================================================
-  # 1. Codex Proxy Adapter (CPA / cli-proxy-api)
-  # ============================================================================
+  # ===== 1. MULTI-TUNNEL SIDECAR (DÙNG ALPINE - GỘP TẤT CẢ CÁC MÁY) =====
+  vast-tunnel:
+    image: alpine:latest
+    restart: unless-stopped
+    container_name: vast-tunnel
+    networks:
+      - vast-net
+    volumes:
+      - /home/Docker/vast-tunnel/ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      - /home/Docker/vast-tunnel/ssh/known_hosts:/root/.ssh/known_hosts:rw
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache openssh-client
+        (while true; do ssh -N -L 0.0.0.0:18000:127.0.0.1:18000 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh5.vast.ai -p 15185; sleep 3; done) &
+        (while true; do ssh -N -L 0.0.0.0:18001:127.0.0.1:18000 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887; sleep 3; done) &
+        wait
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # ===== 2. CLIPROXYAPI =====
   cli-proxy-api:
-    image: ghcr.io/router-for-me/cli-proxy-api:latest
+    image: eceasy/cli-proxy-api:latest
+    pull_policy: always
     container_name: cli-proxy-api
-    restart: always
+    restart: unless-stopped
+    init: true
+    networks:
+      - vast-net
+
     ports:
       - "8317:8317"
+      - "127.0.0.1:1455:1455"
+
     environment:
-      - TZ=Asia/Ho_Chi_Minh
+      TZ: ${TZ:-Europe/Paris}
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD}
+      OPENCODEX_DEVICE_ID_PATH: ${OPENCODEX_DEVICE_ID_PATH:-/data/opencodex/device-id}
+      CPA_PLUGIN_GITHUB_TOKEN: "${CPA_PLUGIN_GITHUB_TOKEN}"
+      CPA_CODEX_COMPACTION_KEY: "${CPA_CODEX_COMPACTION_KEY}"
+
     volumes:
-      - ./config.yaml:/app/config.yaml
-      - ./auth:/root/.cli-proxy-api
-    depends_on:
-      - vast-auto-scaler
+      - /home/Docker/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml:rw
+      - /home/Docker/CLIProxyAPI/.cli-proxy-api:/root/.cli-proxy-api:rw
+      - /home/Docker/CLIProxyAPI/plugins:/CLIProxyAPI/plugins:rw
+      - /home/Docker/CLIProxyAPI/logs:/CLIProxyAPI/logs:rw
+      - /home/Docker/CLIProxyAPI/opencodex:/data/opencodex:rw
 
-  # ============================================================================
-  # 2. Vast.ai On-Demand Auto-Scaler Gateway (Auto-Start / Auto-Sleep Router)
-  # ============================================================================
-  vast-auto-scaler:
-    build:
-      context: ./docker/vast-auto-scaler
-      dockerfile: Dockerfile
-    container_name: vast-auto-scaler
-    restart: always
-    ports:
-      - "8080:8080"
-    environment:
-      - VAST_API_KEY=${VAST_API_KEY:-}
-      - INSTANCE_POOL=${INSTANCE_POOL:-13887}
-      - TARGET_PORT=18000
-      - IDLE_TIMEOUT_MINUTES=20
-      - HEALTH_CHECK_TIMEOUT_SECS=180
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
-  # ============================================================================
-  # 3. Cloudflare Tunnel (Optional: Secure Edge Network)
-  # ============================================================================
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared-tunnel
-    restart: always
-    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
-    environment:
-      - TUNNEL_METRICS=0.0.0.0:2000
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"

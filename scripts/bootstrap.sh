@@ -8,6 +8,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Parse optional arguments
+AUTH_API_KEY="${SGLANG_API_KEY:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --api-key=*)
+            AUTH_API_KEY="${1#*=}"
+            shift
+            ;;
+        --api-key)
+            AUTH_API_KEY="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 echo "================================================================="
 echo "🚀 SGLang Qwen3.8 Fast Provisioning & Self-Build Bootstrap Starting..."
 echo "================================================================="
@@ -86,8 +104,14 @@ if [ -f /etc/environment ]; then
 fi
 
 # 7. Generate Tuned /etc/sglang-args.conf
+AUTH_FLAG=""
+if [ -n "$AUTH_API_KEY" ]; then
+    AUTH_FLAG="--api-key $AUTH_API_KEY"
+    echo "🔒 Configured Unified Cluster API Key protection."
+fi
+
 cat <<EOF > /etc/sglang-args.conf
---tensor-parallel-size $TP_SIZE --speculative-algorithm DFLASH --speculative-draft-model-path $DFLASH_MODEL_PATH --speculative-num-draft-tokens $DRAFT_TOKENS --speculative-draft-model-quantization unquant --kv-cache-dtype fp8_e4m3 --quantization compressed-tensors --trust-remote-code --served-model-name Qwen3.8-27B-Uncensored --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-strict-thinking --mem-fraction-static $MEM_FRACTION --context-length 262144 --allow-auto-truncate --enable-cache-report --chunked-prefill-size 2048 --max-prefill-tokens 16384 --disable-custom-all-reduce --max-running-requests 4 --linear-attn-backend triton --enable-hierarchical-cache --hicache-ratio $HICACHE_RATIO --hicache-write-policy write_through --hicache-io-backend kernel --hicache-mem-layout page_first
+--tensor-parallel-size $TP_SIZE --speculative-algorithm DFLASH --speculative-draft-model-path $DFLASH_MODEL_PATH --speculative-num-draft-tokens $DRAFT_TOKENS --speculative-draft-model-quantization unquant --kv-cache-dtype fp8_e4m3 --quantization compressed-tensors --trust-remote-code --served-model-name Qwen3.8-27B-Uncensored --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-strict-thinking --mem-fraction-static $MEM_FRACTION --context-length 262144 --allow-auto-truncate --enable-cache-report --chunked-prefill-size 2048 --max-prefill-tokens 16384 --disable-custom-all-reduce --max-running-requests 4 --linear-attn-backend triton --enable-hierarchical-cache --hicache-ratio $HICACHE_RATIO --hicache-write-policy write_through --hicache-io-backend kernel --hicache-mem-layout page_first $AUTH_FLAG
 EOF
 
 echo "✅ Saved /etc/sglang-args.conf"
@@ -103,8 +127,13 @@ fi
 # 9. Verification Loop
 echo "⏳ Waiting for SGLang to initialize port 18000..."
 READY=0
+AUTH_HEADER=""
+if [ -n "$AUTH_API_KEY" ]; then
+    AUTH_HEADER="-H \"Authorization: Bearer $AUTH_API_KEY\""
+fi
+
 for i in {1..60}; do
-    if curl -s http://127.0.0.1:18000/v1/models | grep -q "Qwen3.8-27B-Uncensored"; then
+    if eval "curl -s $AUTH_HEADER http://127.0.0.1:18000/v1/models" | grep -q "Qwen3.8-27B-Uncensored"; then
         READY=1
         echo "🎉 SGLang is UP and HEALTHY on port 18000!"
         break
