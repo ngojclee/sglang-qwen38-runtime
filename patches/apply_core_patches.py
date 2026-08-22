@@ -61,12 +61,11 @@ if os.path.exists(trans_qwen35):
 """
     target_q = "class Qwen3_5TextConfig(PreTrainedConfig):"
     if target_q in code_t:
-        if "def mamba2_cache_params" in code_t:
-            code_t = re.sub(r'class Qwen3_5TextConfig\(PreTrainedConfig\):[\s\S]*?return Mamba2CacheParams\([\s\S]*?\n\s+\)', target_q, code_t)
-        code_t = code_t.replace(target_q, target_q + props)
-        with open(trans_qwen35, "w", encoding="utf-8") as f:
-            f.write(code_t)
-        print("✅ Patched transformers configuration_qwen3_5.py directly")
+        if "def mamba2_cache_params" not in code_t:
+            code_t = code_t.replace(target_q, target_q + props)
+            with open(trans_qwen35, "w", encoding="utf-8") as f:
+                f.write(code_t)
+            print("✅ Patched transformers configuration_qwen3_5.py directly")
 
 # 2. Patch memory_pool.py (_transfer_full_attention_id fallback)
 mem_pool_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py"
@@ -74,14 +73,20 @@ if os.path.exists(mem_pool_path):
     with open(mem_pool_path, "r", encoding="utf-8") as f:
         code_mp = f.read()
 
-    pat_tf = r'def _transfer_full_attention_id\(self, layer_id: int\):[\s\S]*?return self\.full_attention_layer_id_mapping\[layer_id\]'
-    repl_tf = """def _transfer_full_attention_id(self, layer_id: int):
+    old_tf = """    def _transfer_full_attention_id(self, layer_id: int):
+        if layer_id not in self.full_attention_layer_id_mapping:
+            raise ValueError(
+                f"{layer_id=} not in full attention layers: {self.full_attention_layer_id_mapping.keys()}"
+            )
+        return self.full_attention_layer_id_mapping[layer_id]"""
+
+    new_tf = """    def _transfer_full_attention_id(self, layer_id: int):
         if layer_id not in self.full_attention_layer_id_mapping:
             return layer_id % len(self.full_attention_layer_id_mapping) if self.full_attention_layer_id_mapping else 0
         return self.full_attention_layer_id_mapping[layer_id]"""
 
-    if "return layer_id % len(self.full_attention_layer_id_mapping)" not in code_mp:
-        code_mp = re.sub(pat_tf, repl_tf, code_mp, count=1)
+    if old_tf in code_mp:
+        code_mp = code_mp.replace(old_tf, new_tf, 1)
         with open(mem_pool_path, "w", encoding="utf-8") as f:
             f.write(code_mp)
         print("✅ Patched memory_pool.py (_transfer_full_attention_id fallback)")
