@@ -2,11 +2,36 @@ import re, os, torch
 
 print("🚀 Applying Unified SGLang + Qwen 3.8 + DFlash2 Patches...")
 
-# 1. Patch hybrid_arch.py (Support Qwen3_5TextConfig / qwen3_5_text model_type)
+# 1. Patch hybrid_arch.py (Attach Qwen3_5TextConfig helpers + hybrid_gdn_config support)
 hybrid_arch_path = "/sgl-workspace/sglang/python/sglang/srt/configs/hybrid_arch.py"
 if os.path.exists(hybrid_arch_path):
     with open(hybrid_arch_path, "r", encoding="utf-8") as f:
         code_h = f.read()
+
+    helpers_patch = """
+try:
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig, Qwen3_5Config
+    for cls in (Qwen3_5TextConfig, Qwen3_5Config):
+        if not hasattr(cls, "full_attention_layer_ids"):
+            @property
+            def _full_attention_layer_ids(self):
+                if hasattr(self, "layers_block_type") and self.layers_block_type:
+                    return [i for i, t in enumerate(self.layers_block_type) if t in ("attention", "full_attention")]
+                interval = getattr(self, "full_attention_interval", 4)
+                return [i for i in range(self.num_hidden_layers) if (i + 1) % interval == 0]
+            cls.full_attention_layer_ids = _full_attention_layer_ids
+
+        if not hasattr(cls, "linear_attention_layer_ids"):
+            @property
+            def _linear_attention_layer_ids(self):
+                full = set(self.full_attention_layer_ids)
+                return [i for i in range(self.num_hidden_layers) if i not in full]
+            cls.linear_attention_layer_ids = _linear_attention_layer_ids
+except Exception as e:
+    pass
+"""
+    if "_full_attention_layer_ids" not in code_h:
+        code_h = code_h + "\n" + helpers_patch
 
     pattern_h = r'def hybrid_gdn_config\(model_config: ModelConfig\):[\s\S]*?config = model_config\.hf_config\.get_text_config\(\)[\s\S]*?if isinstance\('
     repl_h = """def hybrid_gdn_config(model_config: ModelConfig):
@@ -15,34 +40,12 @@ if os.path.exists(hybrid_arch_path):
     
     if "getattr(config, \"model_type\", \"\")" not in code_h:
         code_h = re.sub(pattern_h, repl_h, code_h, count=1)
-        with open(hybrid_arch_path, "w", encoding="utf-8") as f:
-            f.write(code_h)
-        print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig support)")
 
-# 2. Patch kv_cache_configurator.py (Use mamba2_config for mamba2_cache_params)
-kv_config_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py"
-if os.path.exists(kv_config_path):
-    with open(kv_config_path, "r", encoding="utf-8") as f:
-        code_k = f.read()
+    with open(hybrid_arch_path, "w", encoding="utf-8") as f:
+        f.write(code_h)
+    print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & registration)")
 
-    # Import mamba2_config
-    if "from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, mambaish_config, mamba2_config" not in code_k:
-        code_k = code_k.replace(
-            "from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, mambaish_config",
-            "from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, mambaish_config, mamba2_config"
-        )
-
-    # Change self.mambaish_config = mamba2_config(self.model_config)
-    if "self.mambaish_config = mamba2_config(self.model_config)" not in code_k:
-        code_k = code_k.replace(
-            "self.mambaish_config = mambaish_config(self.model_config)",
-            "self.mambaish_config = mamba2_config(self.model_config)"
-        )
-        with open(kv_config_path, "w", encoding="utf-8") as f:
-            f.write(code_k)
-        print("✅ Patched kv_cache_configurator.py (mamba2_config separation)")
-
-# 3. Patch compressed_tensors.py
+# 2. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
 if os.path.exists(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -64,7 +67,7 @@ if os.path.exists(file_path):
             f.write(code)
         print("✅ Patched compressed_tensors.py")
 
-# 4. Patch qwen3_5.py
+# 3. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
@@ -117,7 +120,7 @@ if os.path.exists(qwen35_path):
         f.write(code2)
     print("✅ Patched qwen3_5.py")
 
-# 5. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
+# 4. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
 wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 if os.path.exists(wNa16_path):
     with open(wNa16_path, "r", encoding="utf-8") as f:
@@ -232,7 +235,7 @@ if os.path.exists(wNa16_path):
         f.write(code3)
     print("✅ Patched compressed_tensors_wNa16.py")
 
-# 6. Patch dflash.py (DFlash2DraftModel class registration)
+# 5. Patch dflash.py (DFlash2DraftModel class registration)
 dflash_path = "/sgl-workspace/sglang/python/sglang/srt/models/dflash.py"
 if os.path.exists(dflash_path):
     with open(dflash_path, "r", encoding="utf-8") as f:
