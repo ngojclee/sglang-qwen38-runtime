@@ -73,9 +73,19 @@ if os.path.exists(qwen35_path):
         code2 = re.sub(pattern, new_sub, code2, count=1)
         print("Patched qwen3_5.py get_layer via regex!")
 
-    # B. Fix num_experts in get_model_config_for_expert_location
-    code2 = re.sub(r'num_logical_experts=.*?,', 'num_logical_experts=getattr(config, "num_experts", 0),', code2)
-    print("Patched qwen3_5.py num_experts fallback successfully!")
+    # B. Fix get_model_config_for_expert_location for dense models
+    pattern_expert = r'@classmethod\s+def get_model_config_for_expert_location\(cls, config\):[\s\S]*?return ModelConfigForExpertLocation\([\s\S]*?\)'
+    sub_expert = """@classmethod
+    def get_model_config_for_expert_location(cls, config):
+        if not getattr(config, "num_experts", None):
+            return None
+        return ModelConfigForExpertLocation(
+            num_layers=config.num_hidden_layers,
+            num_logical_experts=config.num_experts,
+            num_groups=None,
+        )"""
+    code2 = re.sub(pattern_expert, sub_expert, code2, count=1)
+    print("Patched qwen3_5.py expert location for dense models successfully!")
 
     # C. EntryClass registration
     if "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]" in code2:
