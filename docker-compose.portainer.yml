@@ -198,7 +198,7 @@ services:
                     idle_seconds = time.time() - last_activity
                     nodes = get_cluster_nodes()
 
-                    # A. Tắt máy nếu không có ai dùng quá IDLE_TIMEOUT_MINUTES
+                    # A. Tắt toàn bộ máy nếu không có ai dùng quá IDLE_TIMEOUT_MINUTES
                     if idle_seconds > (IDLE_TIMEOUT_MINUTES * 60):
                         for node in nodes:
                             if node["instance_id"]:
@@ -209,12 +209,17 @@ services:
                                     print(f"Error stopping instance: {e}", flush=True)
                         current_active_node = None
 
-                    # B. Nếu đang có máy phục vụ -> Tắt tất cả các máy thừa khác
-                    elif current_active_node:
-                        for node in nodes:
-                            if node["target"] != current_active_node["target"] and node["instance_id"]:
-                                if await is_node_healthy(node["target"]):
-                                    print(f"💰 Auto-stopping redundant machine {node['instance_id']} to keep single active node...", flush=True)
+                    # B. Chưa quá timeout: Chủ động chọn 1 máy làm Leader và TẮT ngay các máy thừa còn lại
+                    else:
+                        healthy_nodes = [n for n in nodes if await is_node_healthy(n["target"])]
+                        if healthy_nodes:
+                            if not current_active_node or not (await is_node_healthy(current_active_node["target"])):
+                                current_active_node = healthy_nodes[0]
+                                print(f"🎯 Active leader node set to: {current_active_node['target']} (Instance {current_active_node['instance_id']})", flush=True)
+                            
+                            for node in healthy_nodes:
+                                if node["target"] != current_active_node["target"] and node["instance_id"]:
+                                    print(f"💰 Auto-stopping redundant machine {node['instance_id']} (keeping single active node {current_active_node['instance_id']})...", flush=True)
                                     await set_instance_state(node["instance_id"], "stopped")
             asyncio.create_task(scaler_loop())
 
