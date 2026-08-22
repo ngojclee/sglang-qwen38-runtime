@@ -201,20 +201,20 @@
 
 > **Phương pháp đo chuẩn:** Áp dụng theo **Unified Benchmark Protocol (`benchmark_unified.py`)** với 3 bài test: Test 1 (Speed tok/s trên RB-Tree), Test 2 (Thang Context Ladder 32K -> 262K), Test 3 (Tool Calling Extraction).
 
-| Tiêu chí Đánh giá | Máy A (2× 5060Ti vLLM) | Máy B (2× 5060Ti SGLang) | Máy C (4× 5060Ti Baseline) | Máy C (4× 5060Ti DFlash2) | 👑 **Máy D (2× 3090 Baseline)** | 🚀 **Máy D (2× 3090 DFlash2 Live)** |
+| Tiêu chí Đánh giá | Máy A (2× 5060Ti vLLM) | Máy B (2× 5060Ti SGLang) | Máy C (4× 5060Ti DFlash2) | 📚 **Máy D (2× 3090 Baseline)** | ⚡ **Máy D (2× 3090 DFlash2 BF16)** | 👑 **Máy D (2× 3090 DFlash2 FP8 Live)** |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Test 1: Tốc độ Code Solo (tok/s)** | 35.0 tok/s | 40.4 tok/s | 40.40 tok/s | 75.20 tok/s | **52.25 tok/s** | 👑 **73.52 – 91.53 tok/s** *(Vua tốc độ)* |
-| **Test 2: Mốc 32K Context** | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS | ✅ **PASS (22.42s)** | ✅ **PASS (22.37s)** |
-| **Test 2: Mốc 64K Context** | ✅ PASS | ❌ FAIL (40.9K) | ✅ PASS | ✅ PASS | ✅ **PASS (24.33s)** | ✅ **PASS (24.88s)** |
-| **Test 2: Mốc 100K Context** | ⚠️ Drop Socket | ❌ FAIL | ✅ PASS | ✅ PASS | ✅ **PASS (30.17s)** | ❌ **FAIL (OOM 75.4K VRAM)** |
-| **Test 2: Mốc 150K Context** | ❌ FAIL | ❌ FAIL | ✅ PASS (427K VRAM) | ✅ PASS (180K VRAM) | ✅ **PASS (45.15s - HiCache)** | ❌ FAIL |
-| **Test 2: Mốc 262K Context** | ❌ FAIL | ❌ FAIL | ✅ PASS (427K VRAM) | ⚠️ HiCache RAM | ✅ **PASS (140K VRAM + HiCache)** | ❌ FAIL |
-| **Test 3: Tool Calling (`qwen3_coder`)**| ⚠️ Format JSON | ✅ PASS | ✅ PASS | ✅ PASS | ✅ **PASS (1.57s)** | ✅ **PASS (1.23s)** |
-| **Chi phí thuê / giờ** | ~$0.20/h | ~$0.25/h | ~$0.85/h | ~$0.85/h | 🥇 **~$0.30 – $0.45/h** | 🥇 **~$0.30 – $0.45/h (P/P Vô Địch)** |
+| **Test 1: Tốc độ Code Solo (tok/s)** | 35.0 tok/s | 40.4 tok/s | 75.20 tok/s | **52.25 tok/s** | ⚡ **73.52 – 91.53 tok/s** | 👑 **`71.65 – 91.53 tok/s`** |
+| **Test 2: Mốc 32K Context** | ✅ PASS | ✅ PASS | ✅ PASS | ✅ **PASS (22.42s)** | ✅ **PASS (22.37s)** | ✅ **`PASS (22.82s)`** |
+| **Test 2: Mốc 64K Context** | ✅ PASS | ❌ FAIL (40.9K) | ✅ PASS | ✅ **PASS (24.33s)** | ✅ **PASS (24.88s)** | ✅ **`PASS (25.86s)`** |
+| **Test 2: Mốc 100K Context** | ⚠️ Drop Socket | ❌ FAIL | ✅ PASS | ✅ **PASS (30.17s)** | ❌ FAIL (OOM 75.4K) | 🏆 **`PASS (32.59s - 78K tok)`** |
+| **Test 2: Mốc 150K Context** | ❌ FAIL | ❌ FAIL | ✅ PASS (180K VRAM) | ✅ **PASS (45.15s - HiCache)** | ❌ FAIL | 🏆 **`PASS (48.93s - 117K tok)`** |
+| **Test 2: Mốc 262K Context** | ❌ FAIL | ❌ FAIL | ⚠️ HiCache RAM | ✅ **PASS (140K VRAM + HiCache)** | ❌ FAIL | ⚠️ **150.8K VRAM + HiCache** |
+| **Test 3: Tool Calling (`qwen3_coder`)**| ⚠️ Format JSON | ✅ PASS | ✅ PASS | ✅ **PASS (1.57s)** | ✅ **PASS (1.23s)** | ✅ **`PASS (1.35s)`** |
+| **Chi phí thuê / giờ** | ~$0.20/h | ~$0.25/h | ~$0.85/h | 🥇 **~$0.30 – $0.45/h** | 🥇 **~$0.30 – $0.45/h** | 🥇 **`~$0.30 – $0.45/h (Đỉnh Cao)`** |
 
 #### 🧠 Chi tiết Phân Bổ Dung Lượng Context Thực Tế:
-1. **Chế độ DFlash2 Speed Mode (Máy D):** Phù hợp tác vụ coding thông thường, context < 64K. Đạt tốc độ cực đại **91.5 tok/s**, trần VRAM là **75.410 tokens**.
-2. **Chế độ Full Context 262K Mode (Máy D):** Phù hợp khi nạp cả codebase lớn >100K context. Đạt tốc độ **52.25 tok/s**, trần VRAM là **140.669 tokens** + **281.338 tokens trên HiCache RAM**.
+1. **Chế độ DFlash2 FP8 Mode (Máy D Live Hiện Tại):** Cấp phát **150.821 tokens KV Cache FP8** ngay trên VRAM (gấp đôi bản BF16). Chạy siêu tốc **71.65 – 91.53 tok/s**, nuốt mượt mà context tới **150.000 tokens**.
+2. **Chế độ Full Context 262K Baseline (Máy D):** Tắt DFlash2 để mở rộng VRAM thành **140.669 tokens BF16** + **281.338 tokens trên HiCache RAM**, chạy ổn định ở **52.25 tok/s** cho context dài tới 262K.
 3. **Cơ chế vận hành:** Tự động hoán đổi qua lại giữa 2 chế độ bằng 2 script 1-click `start_dflash2.sh` và `start_262k.sh`.
 
 ---
