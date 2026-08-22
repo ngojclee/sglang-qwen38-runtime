@@ -1,0 +1,696 @@
+diff --git a/python/sglang/srt/configs/__init__.py b/python/sglang/srt/configs/__init__.py
+index 262dd05..dc0b5c2 100644
+--- a/python/sglang/srt/configs/__init__.py
++++ b/python/sglang/srt/configs/__init__.py
+@@ -37,7 +37,7 @@ from sglang.srt.configs.nano_nemotron_vl import (
+ )
+ from sglang.srt.configs.nemotron_h import NemotronHConfig, NemotronHPuzzleConfig
+ from sglang.srt.configs.olmo3 import Olmo3Config
+-from sglang.srt.configs.qwen3_5 import Qwen3_5Config, Qwen3_5MoeConfig
++from sglang.srt.configs.qwen3_5 import Qwen3_5Config, Qwen3_5MoeConfig, Qwen3_5TextConfig
+ from sglang.srt.configs.qwen3_asr import Qwen3ASRConfig
+ from sglang.srt.configs.qwen3_next import Qwen3NextConfig
+ from sglang.srt.configs.step3_vl import (
+@@ -71,6 +71,7 @@ __all__ = [
+     "Qwen3NextConfig",
+     "Qwen3_5Config",
+     "Qwen3_5MoeConfig",
++    "Qwen3_5TextConfig",
+     "InternS2PreviewConfig",
+     "DotsVLMConfig",
+     "DotsOCRConfig",
+diff --git a/python/sglang/srt/configs/hybrid_arch.py b/python/sglang/srt/configs/hybrid_arch.py
+index e3e05b2..1ae7a51 100644
+--- a/python/sglang/srt/configs/hybrid_arch.py
++++ b/python/sglang/srt/configs/hybrid_arch.py
+@@ -19,6 +19,7 @@ from sglang.srt.configs import (
+     NemotronHConfig,
+     Qwen3_5Config,
+     Qwen3_5MoeConfig,
++    Qwen3_5TextConfig,
+     Qwen3NextConfig,
+     ZayaConfig,
+ )
+@@ -47,11 +48,22 @@ def hybrid_lightning_config(model_config: ModelConfig):
+ 
+ def hybrid_gdn_config(model_config: ModelConfig):
+     config = model_config.hf_config.get_text_config()
++    if type(config).__name__ in (
++        "Qwen3NextConfig",
++        "Qwen3_5Config",
++        "Qwen3_5MoeConfig",
++        "Qwen3_5TextConfig",
++        "InternS2PreviewConfig",
++        "JetNemotronConfig",
++        "JetVLMConfig",
++    ) or getattr(config, "model_type", None) in ("qwen3_5", "qwen3_5_text", "qwen3_next", "qwen3_5_moe"):
++        return config
+     if isinstance(
+         config,
+         Qwen3NextConfig
+         | Qwen3_5Config
+         | Qwen3_5MoeConfig
++        | Qwen3_5TextConfig
+         | InternS2PreviewConfig
+         | JetNemotronConfig
+         | JetVLMConfig,
+diff --git a/python/sglang/srt/configs/qwen3_5.py b/python/sglang/srt/configs/qwen3_5.py
+index 98de12f..84d4764 100644
+--- a/python/sglang/srt/configs/qwen3_5.py
++++ b/python/sglang/srt/configs/qwen3_5.py
+@@ -136,3 +136,15 @@ class Qwen3_5MoeConfig(Qwen3_5Config):
+ 
+     def __init__(self, **kwargs):
+         super().__init__(**kwargs)
++
++import transformers.models.qwen3_5.configuration_qwen3_5 as hf_qwen35
++
++# Attach Qwen3NextConfig hybrid GDN properties to HuggingFace Qwen3_5 configs
++for cls in (hf_qwen35.Qwen3_5TextConfig, getattr(hf_qwen35, "Qwen3_5Config", None)):
++    if cls is None:
++        continue
++    for attr in ["layers_block_type", "linear_layer_ids", "full_attention_layer_ids", "mamba2_cache_params"]:
++        if hasattr(Qwen3NextConfig, attr) and not hasattr(cls, attr):
++            setattr(cls, attr, getattr(Qwen3NextConfig, attr))
++    if not hasattr(cls, "full_attention_interval"):
++        setattr(cls, "full_attention_interval", 4)
+diff --git a/python/sglang/srt/configs/qwen3_next.py b/python/sglang/srt/configs/qwen3_next.py
+index 8ae2629..c12f6f3 100644
+--- a/python/sglang/srt/configs/qwen3_next.py
++++ b/python/sglang/srt/configs/qwen3_next.py
+@@ -297,8 +297,12 @@ class Qwen3NextConfig(PretrainedConfig):
+         # decode with different attn_tp_size (see _send_mamba_state_slice).
+         key_dim = self.linear_key_head_dim * self.linear_num_key_heads
+         value_dim = self.linear_value_head_dim * self.linear_num_value_heads
++        try:
++            tp_size = get_parallel().attn_tp_size
++        except Exception:
++            tp_size = 1
+         shape = Mamba2StateShape.create(
+-            tp_world_size=get_parallel().attn_tp_size,
++            tp_world_size=tp_size,
+             intermediate_size=self.linear_value_head_dim * self.linear_num_value_heads,
+             n_groups=self.linear_num_key_heads,
+             num_heads=self.linear_num_value_heads,
+diff --git a/python/sglang/srt/eplb/expert_location.py b/python/sglang/srt/eplb/expert_location.py
+index e4f5de8..a54dba3 100644
+--- a/python/sglang/srt/eplb/expert_location.py
++++ b/python/sglang/srt/eplb/expert_location.py
+@@ -223,7 +223,7 @@ class ExpertLocationMetadata:
+             ModelConfigForExpertLocation.from_model_config(model_config)
+         )
+ 
+-        if model_config_for_expert_location is None:
++        if model_config_for_expert_location is None or not model_config_for_expert_location.num_logical_experts:
+             return None
+ 
+         base_num_physical_experts = (
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+index f9d3e2e..70c2a18 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+@@ -224,6 +224,13 @@ class CompressedTensorsConfig(QuantizationConfig):
+             config=config
+         )
+         packed_modules_mapping = config.get("packed_modules_mapping", {})
++        if not packed_modules_mapping:
++            packed_modules_mapping = {
++                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
++                "gate_up_proj": ["gate_proj", "up_proj"],
++                "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
++                "in_proj_ba": ["in_proj_b", "in_proj_a"],
++            }
+ 
+         # Parse linear_fp8_config if present (for mixed quantization scenarios)
+         # Format: {"activation_scheme": "dynamic", "fmt": "e4m3",
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index fe26e90..7099cfb 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -1,3 +1,5 @@
++
++
+ # Copyright 2025 Qwen Team
+ # Copyright 2025 SGLang Team
+ # Licensed under the Apache License, Version 2.0 (the "License");
+@@ -19,6 +21,16 @@ from functools import lru_cache
+ from typing import Iterable, Optional, Set, Tuple, Union
+ 
+ import torch
++
++from compressed_tensors import unpack_from_int32
++
++def unpack_4bit_gdn(packed_w: torch.Tensor, scale: torch.Tensor, group_size: int = 128) -> torch.Tensor:
++    N, K_packed = packed_w.shape
++    orig_shape = torch.Size([N, K_packed * 8])
++    unpacked = unpack_from_int32(packed_w, num_bits=4, shape=orig_shape, packed_dim=1)
++    scale_expanded = scale.repeat_interleave(group_size, dim=1)
++    return unpacked.to(scale.dtype) * scale_expanded
++
+ import torch.nn as nn
+ import triton
+ 
+@@ -67,7 +79,9 @@ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
+ from sglang.srt.layers.rotary_embedding import get_rope
+ from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
+-from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
++from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
++from sglang.srt.layers.logits_processor import LogitsProcessor
++from sglang.srt.layers.pooler import Pooler, PoolingType
+ from sglang.srt.model_executor.cuda_graph_config import (
+     Backend,
+     Phase,
+@@ -217,7 +231,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             hidden_size=self.hidden_size,
+             key_dim=self.key_dim,
+             value_dim=self.value_dim,
+-            quant_config=quant_config,
++            quant_config=None,
+             prefix=add_prefix("in_proj_qkvz", prefix),
+             tp_rank=self.attn_tp_rank,
+             tp_size=self.attn_tp_size,
+@@ -226,7 +240,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+         self.in_proj_ba = self.create_ba_proj(
+             hidden_size=self.hidden_size,
+             num_v_heads=self.num_v_heads,
+-            quant_config=quant_config,
++            quant_config=None,
+             prefix=add_prefix("in_proj_ba", prefix),
+             tp_rank=self.attn_tp_rank,
+             tp_size=self.attn_tp_size,
+@@ -315,7 +329,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             bias=False,
+             input_is_parallel=True,
+             reduce_results=False,
+-            quant_config=quant_config,
++            quant_config=None,
+             tp_rank=self.attn_tp_rank,
+             tp_size=self.attn_tp_size,
+             prefix=add_prefix("out_proj", prefix),
+@@ -1119,11 +1133,12 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
+ 
+ ALL_DECODER_LAYER_TYPES = {
+     "attention": Qwen3_5AttentionDecoderLayer,
++    "full_attention": Qwen3_5AttentionDecoderLayer,
+     "linear_attention": Qwen3_5LinearDecoderLayer,
+ }
+ 
+ 
+-class Qwen3_5ForCausalLM(nn.Module):
++class Qwen3_5Model(nn.Module):
+     """Qwen3.5 Model with support for dense variant."""
+ 
+     packed_modules_mapping = {
+@@ -1241,9 +1256,13 @@ class Qwen3_5ForCausalLM(nn.Module):
+ 
+         # Decoder layers
+         def get_layer(idx: int, prefix: str):
+-            layer_type = config.layers_block_type[idx]
++            layer_types_list = getattr(config, "layers_block_type", None) or getattr(config, "layer_types", None)
++            if layer_types_list is not None:
++                layer_type = layer_types_list[idx]
++            else:
++                layer_type = "full_attention" if (idx + 1) % config.full_attention_interval == 0 else "linear_attention"
+             layer_class = ALL_DECODER_LAYER_TYPES[layer_type]
+-            if layer_type == "attention":
++            if layer_type in ("attention", "full_attention"):
+                 prefix = add_prefix("self_attn", prefix)
+             else:
+                 prefix = add_prefix("linear_attn", prefix)
+@@ -1378,6 +1397,7 @@ class Qwen3_5ForCausalLM(nn.Module):
+ 
+         loaded_params: Set[str] = set()
+         params_dict = dict(self.named_parameters(remove_duplicate=False))
++        gdn_buffer = {}
+         for name, loaded_weight in weights:
+             if "rotary_emb.inv_freq" in name:
+                 continue
+@@ -1389,6 +1409,91 @@ class Qwen3_5ForCausalLM(nn.Module):
+                 name = name.replace(r"model.language_model.", r"model.")
+             if ".self_attn." in name:
+                 name = name.replace(".self_attn", "")
++
++            if name.endswith(".weight_shape") and ".linear_attn." in name:
++                continue
++
++            # GDN compressed-tensors unpacking adapter
++            if ".linear_attn." in name:
++                layer_id = get_layer_id(name)
++                if "in_proj_qkv.weight_packed" in name:
++                    gdn_buffer[(layer_id, "qkv_p")] = loaded_weight
++                elif "in_proj_qkv.weight_scale" in name:
++                    gdn_buffer[(layer_id, "qkv_s")] = loaded_weight
++                elif "in_proj_z.weight_packed" in name:
++                    gdn_buffer[(layer_id, "z_p")] = loaded_weight
++                elif "in_proj_z.weight_scale" in name:
++                    gdn_buffer[(layer_id, "z_s")] = loaded_weight
++                elif "in_proj_b.weight_packed" in name:
++                    gdn_buffer[(layer_id, "b_p")] = loaded_weight
++                elif "in_proj_b.weight_scale" in name:
++                    gdn_buffer[(layer_id, "b_s")] = loaded_weight
++                elif "in_proj_a.weight_packed" in name:
++                    gdn_buffer[(layer_id, "a_p")] = loaded_weight
++                elif "in_proj_a.weight_scale" in name:
++                    gdn_buffer[(layer_id, "a_s")] = loaded_weight
++                elif "out_proj.weight_packed" in name:
++                    gdn_buffer[(layer_id, "out_p")] = loaded_weight
++                elif "out_proj.weight_scale" in name:
++                    gdn_buffer[(layer_id, "out_s")] = loaded_weight
++
++                if (layer_id, "qkv_p") in gdn_buffer and (layer_id, "qkv_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "qkv_p"))
++                    s = gdn_buffer.pop((layer_id, "qkv_s"))
++                    qkv_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_qkvz.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, qkv_fp, (0, 1, 2))
++                        loaded_params.add(f"{target_name}.qkv")
++
++                if (layer_id, "z_p") in gdn_buffer and (layer_id, "z_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "z_p"))
++                    s = gdn_buffer.pop((layer_id, "z_s"))
++                    z_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_qkvz.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, z_fp, 3)
++                        loaded_params.add(f"{target_name}.z")
++
++                if (layer_id, "b_p") in gdn_buffer and (layer_id, "b_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "b_p"))
++                    s = gdn_buffer.pop((layer_id, "b_s"))
++                    b_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_ba.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, b_fp, 0)
++                        loaded_params.add(f"{target_name}.b")
++
++                if (layer_id, "a_p") in gdn_buffer and (layer_id, "a_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "a_p"))
++                    s = gdn_buffer.pop((layer_id, "a_s"))
++                    a_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_ba.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, a_fp, 1)
++                        loaded_params.add(f"{target_name}.a")
++
++                if (layer_id, "out_p") in gdn_buffer and (layer_id, "out_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "out_p"))
++                    s = gdn_buffer.pop((layer_id, "out_s"))
++                    out_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.out_proj.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, out_fp)
++                        loaded_params.add(target_name)
++
++                if any(x in name for x in ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj.weight_packed", "out_proj.weight_scale"]):
++                    continue
+             layer_id = get_layer_id(name)
+             if (
+                 layer_id is not None
+@@ -1433,14 +1538,15 @@ class Qwen3_5ForCausalLM(nn.Module):
+ 
+     @classmethod
+     def get_model_config_for_expert_location(cls, config):
++        text_config = getattr(config, "text_config", config)
+         return ModelConfigForExpertLocation(
+-            num_layers=config.num_hidden_layers,
+-            num_logical_experts=config.num_experts,
++            num_layers=getattr(text_config, "num_hidden_layers", 0),
++            num_logical_experts=getattr(text_config, "num_experts", 0),
+             num_groups=None,
+         )
+ 
+ 
+-class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
++class Qwen3_5MoeModel(Qwen3_5Model):
+     def __init__(
+         self,
+         config: Qwen3_5TextConfig,
+@@ -1650,6 +1756,224 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
+         return loaded_params
+ 
+ 
++
++
++class Qwen3_5ForCausalLM(nn.Module):
++    packed_modules_mapping = Qwen3_5Model.packed_modules_mapping
++    supported_lora_modules = Qwen3_5Model.supported_lora_modules
++
++    def __init__(
++        self,
++        config: Qwen3_5TextConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ) -> None:
++        super().__init__()
++        self.pp_group = get_pp_group()
++        self.config = config
++        self.quant_config = quant_config
++        self.model = Qwen3_5Model(
++            config, quant_config=quant_config, prefix=add_prefix("model", prefix)
++        )
++
++        if self.pp_group.is_last_rank:
++            if self.pp_group.world_size == 1 and getattr(config, "tie_word_embeddings", False):
++                self.lm_head = self.model.embed_tokens
++            else:
++                self.lm_head = ParallelLMHead(
++                    config.vocab_size,
++                    config.hidden_size,
++                    quant_config=quant_config,
++                    prefix=add_prefix("lm_head", prefix),
++                )
++        else:
++            self.lm_head = PPMissingLayer()
++
++        self.logits_processor = LogitsProcessor(config)
++        self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
++        self.capture_aux_hidden_states = False
++
++    def get_input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
++        return self.model.get_input_embedding(input_ids)
++
++    def get_input_embeddings(self) -> nn.Embedding:
++        return self.model.embed_tokens
++
++    def set_dflash_layers_to_capture(self, layers_to_capture: list[int]):
++        self.model.set_dflash_layers_to_capture(layers_to_capture)
++
++    @property
++    def start_layer(self) -> int:
++        return self.model.start_layer
++
++    @property
++    def end_layer(self) -> int:
++        return self.model.end_layer
++
++    @torch.no_grad()
++    def forward(
++        self,
++        input_ids: torch.Tensor,
++        positions: torch.Tensor,
++        forward_batch: ForwardBatch,
++        input_embeds: Optional[torch.Tensor] = None,
++        get_embedding: bool = False,
++        pp_proxy_tensors: Optional[PPProxyTensors] = None,
++    ) -> torch.Tensor:
++        res = self.model(
++            input_ids,
++            positions,
++            forward_batch,
++            input_embeds=input_embeds,
++            pp_proxy_tensors=pp_proxy_tensors,
++        )
++        if isinstance(res, tuple):
++            hidden_states, aux_hidden_states = res
++        else:
++            hidden_states = res
++            aux_hidden_states = None
++
++        if self.pp_group.is_last_rank:
++            if not get_embedding:
++                return self.logits_processor(
++                    input_ids,
++                    hidden_states,
++                    self.lm_head,
++                    forward_batch,
++                    aux_hidden_states,
++                )
++            else:
++                return self.pooler(hidden_states, forward_batch)
++        else:
++            return hidden_states
++
++    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
++        stacked_params_mapping = [
++            ("qkv_proj", "q_proj", "q"),
++            ("qkv_proj", "k_proj", "k"),
++            ("qkv_proj", "v_proj", "v"),
++            ("gate_up_proj", "gate_proj", 0),
++            ("gate_up_proj", "up_proj", 1),
++        ]
++        params_dict = dict(self.named_parameters(remove_duplicate=False))
++        loaded_params: Set[str] = set()
++        gdn_buffer = {}
++
++        for name, loaded_weight in weights:
++            if "rotary_emb.inv_freq" in name or "mtp" in name or "visual" in name:
++                continue
++            if "language_model" in name:
++                name = name.replace(r"model.language_model.", r"model.")
++            if ".self_attn." in name:
++                name = name.replace(".self_attn", "")
++            if name.endswith(".weight_shape") and ".linear_attn." in name:
++                continue
++
++            if ".linear_attn." in name:
++                layer_id = get_layer_id(name)
++                if "in_proj_qkv.weight_packed" in name:
++                    gdn_buffer[(layer_id, "qkv_p")] = loaded_weight
++                elif "in_proj_qkv.weight_scale" in name:
++                    gdn_buffer[(layer_id, "qkv_s")] = loaded_weight
++                elif "in_proj_z.weight_packed" in name:
++                    gdn_buffer[(layer_id, "z_p")] = loaded_weight
++                elif "in_proj_z.weight_scale" in name:
++                    gdn_buffer[(layer_id, "z_s")] = loaded_weight
++                elif "in_proj_b.weight_packed" in name:
++                    gdn_buffer[(layer_id, "b_p")] = loaded_weight
++                elif "in_proj_b.weight_scale" in name:
++                    gdn_buffer[(layer_id, "b_s")] = loaded_weight
++                elif "in_proj_a.weight_packed" in name:
++                    gdn_buffer[(layer_id, "a_p")] = loaded_weight
++                elif "in_proj_a.weight_scale" in name:
++                    gdn_buffer[(layer_id, "a_s")] = loaded_weight
++                elif "out_proj.weight_packed" in name:
++                    gdn_buffer[(layer_id, "out_p")] = loaded_weight
++                elif "out_proj.weight_scale" in name:
++                    gdn_buffer[(layer_id, "out_s")] = loaded_weight
++
++                if (layer_id, "qkv_p") in gdn_buffer and (layer_id, "qkv_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "qkv_p"))
++                    s = gdn_buffer.pop((layer_id, "qkv_s"))
++                    qkv_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_qkvz.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, qkv_fp, (0, 1, 2))
++                        loaded_params.add(f"{target_name}.qkv")
++
++                if (layer_id, "z_p") in gdn_buffer and (layer_id, "z_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "z_p"))
++                    s = gdn_buffer.pop((layer_id, "z_s"))
++                    z_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_qkvz.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, z_fp, 3)
++                        loaded_params.add(f"{target_name}.z")
++
++                if (layer_id, "b_p") in gdn_buffer and (layer_id, "b_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "b_p"))
++                    s = gdn_buffer.pop((layer_id, "b_s"))
++                    b_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_ba.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, b_fp, 0)
++                        loaded_params.add(f"{target_name}.b")
++
++                if (layer_id, "a_p") in gdn_buffer and (layer_id, "a_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "a_p"))
++                    s = gdn_buffer.pop((layer_id, "a_s"))
++                    a_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_ba.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, a_fp, 1)
++                        loaded_params.add(f"{target_name}.a")
++
++                if (layer_id, "out_p") in gdn_buffer and (layer_id, "out_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "out_p"))
++                    s = gdn_buffer.pop((layer_id, "out_s"))
++                    out_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.out_proj.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, out_fp)
++                        loaded_params.add(target_name)
++
++                if any(x in name for x in ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj.weight_packed", "out_proj.weight_scale"]):
++                    continue
++
++            for param_name, weight_name, shard_id in stacked_params_mapping:
++                if weight_name not in name:
++                    continue
++                name = name.replace(weight_name, param_name)
++                if name in params_dict:
++                    param = params_dict[name]
++                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                    weight_loader(param, loaded_weight, shard_id)
++                    break
++            else:
++                if name in params_dict:
++                    param = params_dict[name]
++                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                    weight_loader(param, loaded_weight)
++                else:
++                    logger.warning(f"Parameter {name} not found in params_dict")
++            loaded_params.add(name)
++
++        return loaded_params
++
++    @classmethod
++    def get_model_config_for_expert_location(cls, config):
++        return Qwen3_5Model.get_model_config_for_expert_location(config)
++
+ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
+     packed_modules_mapping = Qwen3_5ForCausalLM.packed_modules_mapping
+     hf_to_sglang_mapper = None
+@@ -1661,7 +1985,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
+         config: Qwen3_5Config,
+         quant_config: Optional[QuantizationConfig] = None,
+         prefix: str = "",
+-        language_model_cls=Qwen3_5ForCausalLM,
++        language_model_cls=Qwen3_5Model,
+     ):
+         super().__init__(config, quant_config, prefix, language_model_cls)
+ 
+@@ -1727,6 +2051,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
+ 
+         loaded_params: Set[str] = set()
+         params_dict = dict(self.named_parameters(remove_duplicate=False))
++        gdn_buffer = {}
+         for name, loaded_weight in weights:
+             if "rotary_emb.inv_freq" in name:
+                 continue
+@@ -1736,6 +2061,91 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
+                 name = name.replace(r"model.language_model.", r"model.")
+             if ".self_attn." in name:
+                 name = name.replace(".self_attn", "")
++
++            if name.endswith(".weight_shape") and ".linear_attn." in name:
++                continue
++
++            # GDN compressed-tensors unpacking adapter
++            if ".linear_attn." in name:
++                layer_id = get_layer_id(name)
++                if "in_proj_qkv.weight_packed" in name:
++                    gdn_buffer[(layer_id, "qkv_p")] = loaded_weight
++                elif "in_proj_qkv.weight_scale" in name:
++                    gdn_buffer[(layer_id, "qkv_s")] = loaded_weight
++                elif "in_proj_z.weight_packed" in name:
++                    gdn_buffer[(layer_id, "z_p")] = loaded_weight
++                elif "in_proj_z.weight_scale" in name:
++                    gdn_buffer[(layer_id, "z_s")] = loaded_weight
++                elif "in_proj_b.weight_packed" in name:
++                    gdn_buffer[(layer_id, "b_p")] = loaded_weight
++                elif "in_proj_b.weight_scale" in name:
++                    gdn_buffer[(layer_id, "b_s")] = loaded_weight
++                elif "in_proj_a.weight_packed" in name:
++                    gdn_buffer[(layer_id, "a_p")] = loaded_weight
++                elif "in_proj_a.weight_scale" in name:
++                    gdn_buffer[(layer_id, "a_s")] = loaded_weight
++                elif "out_proj.weight_packed" in name:
++                    gdn_buffer[(layer_id, "out_p")] = loaded_weight
++                elif "out_proj.weight_scale" in name:
++                    gdn_buffer[(layer_id, "out_s")] = loaded_weight
++
++                if (layer_id, "qkv_p") in gdn_buffer and (layer_id, "qkv_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "qkv_p"))
++                    s = gdn_buffer.pop((layer_id, "qkv_s"))
++                    qkv_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_qkvz.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, qkv_fp, (0, 1, 2))
++                        loaded_params.add(f"{target_name}.qkv")
++
++                if (layer_id, "z_p") in gdn_buffer and (layer_id, "z_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "z_p"))
++                    s = gdn_buffer.pop((layer_id, "z_s"))
++                    z_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_qkvz.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, z_fp, 3)
++                        loaded_params.add(f"{target_name}.z")
++
++                if (layer_id, "b_p") in gdn_buffer and (layer_id, "b_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "b_p"))
++                    s = gdn_buffer.pop((layer_id, "b_s"))
++                    b_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_ba.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, b_fp, 0)
++                        loaded_params.add(f"{target_name}.b")
++
++                if (layer_id, "a_p") in gdn_buffer and (layer_id, "a_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "a_p"))
++                    s = gdn_buffer.pop((layer_id, "a_s"))
++                    a_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.in_proj_ba.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, a_fp, 1)
++                        loaded_params.add(f"{target_name}.a")
++
++                if (layer_id, "out_p") in gdn_buffer and (layer_id, "out_s") in gdn_buffer:
++                    p = gdn_buffer.pop((layer_id, "out_p"))
++                    s = gdn_buffer.pop((layer_id, "out_s"))
++                    out_fp = unpack_4bit_gdn(p, s)
++                    target_name = f"model.layers.{layer_id}.linear_attn.out_proj.weight"
++                    if target_name in params_dict:
++                        param = params_dict[target_name]
++                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                        weight_loader(param, out_fp)
++                        loaded_params.add(target_name)
++
++                if any(x in name for x in ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj.weight_packed", "out_proj.weight_scale"]):
++                    continue
+             if (
+                 self.config.tie_word_embeddings
+                 and self.pp_group.is_last_rank
+@@ -1819,7 +2229,7 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+         config: Qwen3_5MoeConfig,
+         quant_config: Optional[QuantizationConfig] = None,
+         prefix: str = "",
+-        language_model_cls=Qwen3_5MoeForCausalLM,
++        language_model_cls=Qwen3_5MoeModel,
+     ) -> None:
+         super().__init__(config, quant_config, prefix, language_model_cls)
+         rope_config = getattr(self.config, "rope_parameters", None) or getattr(
+@@ -2190,10 +2600,10 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+     def get_model_config_for_expert_location(cls, config):
+         text_config = getattr(config, "text_config", config)
+         return ModelConfigForExpertLocation(
+-            num_layers=text_config.num_hidden_layers,
+-            num_logical_experts=text_config.num_experts,
++            num_layers=getattr(text_config, "num_hidden_layers", 0),
++            num_logical_experts=getattr(text_config, "num_experts", 0),
+             num_groups=None,
+         )
+ 
+ 
+-EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]
++EntryClass = [Qwen3_5ForCausalLM, Qwen3_5ForConditionalGeneration, Qwen3_5MoeForConditionalGeneration]
