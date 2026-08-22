@@ -24,7 +24,7 @@ if os.path.exists(trans_qwen35):
     @property
     def mamba2_cache_params(self):
         from sglang.srt.configs.mamba_utils import Mamba2CacheParams, Mamba2StateShape, mamba2_state_dtype
-        from sglang.srt.distributed.parallel_state import get_parallel
+        from sglang.srt.runtime_context import get_parallel
 
         linear_key_head_dim = getattr(self, "linear_key_head_dim", 128)
         linear_num_key_heads = getattr(self, "linear_num_key_heads", 16)
