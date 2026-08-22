@@ -23,8 +23,19 @@ if os.path.exists(trans_qwen35):
 
     @property
     def mamba2_cache_params(self):
+        import torch
         from sglang.srt.configs.mamba_utils import Mamba2CacheParams, Mamba2StateShape, mamba2_state_dtype
         from sglang.srt.runtime_context import get_parallel
+
+        try:
+            tp_size = get_parallel().attn_tp_size
+        except Exception:
+            tp_size = 1
+
+        try:
+            dtype = mamba2_state_dtype(self)
+        except Exception:
+            dtype = torch.bfloat16
 
         linear_key_head_dim = getattr(self, "linear_key_head_dim", 128)
         linear_num_key_heads = getattr(self, "linear_num_key_heads", 16)
@@ -35,7 +46,7 @@ if os.path.exists(trans_qwen35):
         key_dim = linear_key_head_dim * linear_num_key_heads
         value_dim = linear_value_head_dim * linear_num_value_heads
         shape = Mamba2StateShape.create(
-            tp_world_size=get_parallel().attn_tp_size,
+            tp_world_size=tp_size,
             intermediate_size=value_dim,
             n_groups=linear_num_key_heads,
             num_heads=linear_num_value_heads,
@@ -45,13 +56,14 @@ if os.path.exists(trans_qwen35):
             conv_shard_groups=[key_dim, key_dim, value_dim],
         )
         return Mamba2CacheParams(
-            shape=shape, layers=self.linear_attention_layer_ids, dtype=mamba2_state_dtype(self)
+            shape=shape, layers=self.linear_attention_layer_ids, dtype=dtype
         )
 """
     target_q = "class Qwen3_5TextConfig(PreTrainedConfig):"
     if target_q in code_t:
+        # Strip existing mamba2_cache_params if already present
         if "def mamba2_cache_params" in code_t:
-            code_t = re.sub(r'class Qwen3_5TextConfig\(PreTrainedConfig\):[\s\S]*?@property\s+def mamba2_cache_params[\s\S]*?dtype=mamba2_state_dtype\(self\)\s+\)', target_q, code_t)
+            code_t = re.sub(r'class Qwen3_5TextConfig\(PreTrainedConfig\):[\s\S]*?return Mamba2CacheParams\([\s\S]*?\n\s+\)', target_q, code_t)
         code_t = code_t.replace(target_q, target_q + props)
         with open(trans_qwen35, "w", encoding="utf-8") as f:
             f.write(code_t)
