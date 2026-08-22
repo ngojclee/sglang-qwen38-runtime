@@ -45,7 +45,34 @@ except Exception as e:
         f.write(code_h)
     print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & registration)")
 
-# 2. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
+# 2. Patch kv_cache_configurator.py (_handle_max_mamba_cache guard for non-Mamba2)
+kv_config_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py"
+if os.path.exists(kv_config_path):
+    with open(kv_config_path, "r", encoding="utf-8") as f:
+        code_k = f.read()
+
+    # Restore self.mambaish_config = mambaish_config(self.model_config)
+    code_k = code_k.replace(
+        "self.mambaish_config = mamba2_config(self.model_config)",
+        "self.mambaish_config = mambaish_config(self.model_config)"
+    )
+
+    pattern_k = r'def _handle_max_mamba_cache\(self, total_rest_memory\):[\s\S]*?assert config is not None'
+    repl_k = """def _handle_max_mamba_cache(self, total_rest_memory):
+        config = self.mambaish_config
+        server_args = self.server_args
+        assert config is not None
+        if not hasattr(config, "mamba2_cache_params") or config.mamba2_cache_params is None:
+            return total_rest_memory"""
+
+    if "if not hasattr(config, \"mamba2_cache_params\")" not in code_k:
+        code_k = re.sub(pattern_k, repl_k, code_k, count=1)
+
+    with open(kv_config_path, "w", encoding="utf-8") as f:
+        f.write(code_k)
+    print("✅ Patched kv_cache_configurator.py (_handle_max_mamba_cache guard)")
+
+# 3. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
 model_config_path = "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py"
 if os.path.exists(model_config_path):
     with open(model_config_path, "r", encoding="utf-8") as f:
@@ -67,27 +94,6 @@ if os.path.exists(model_config_path):
         with open(model_config_path, "w", encoding="utf-8") as f:
             f.write(code_mc)
         print("✅ Patched model_config.py (get_hybrid_layer_ids for Qwen 3.5/3.8)")
-
-# 3. Patch layer_setup.py (num_effective_layers for hybrid models)
-layer_setup_path = "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner_components/layer_setup.py"
-if os.path.exists(layer_setup_path):
-    with open(layer_setup_path, "r", encoding="utf-8") as f:
-        code_ls = f.read()
-
-    target_ls = "    num_effective_layers = pp_range.end_layer - pp_range.start_layer"
-    repl_ls = """    num_effective_layers = pp_range.end_layer - pp_range.start_layer
-    if getattr(model_config, "full_attention_layer_ids", None) is not None:
-        full_attn_ids = [
-            idx for idx in range(pp_range.start_layer, pp_range.end_layer)
-            if idx in model_config.full_attention_layer_ids
-        ]
-        num_effective_layers = len(full_attn_ids)"""
-
-    if target_ls in code_ls and "full_attn_ids =" not in code_ls:
-        code_ls = code_ls.replace(target_ls, repl_ls, 1)
-        with open(layer_setup_path, "w", encoding="utf-8") as f:
-            f.write(code_ls)
-        print("✅ Patched layer_setup.py (num_effective_layers for hybrid models)")
 
 # 4. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
