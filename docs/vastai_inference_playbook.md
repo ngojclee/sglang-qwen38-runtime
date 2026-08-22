@@ -536,9 +536,10 @@ requires_openai_auth = true
 ```json
 [
   {
-    "id": "Qwen3.8-27B-Uncensored",
-    "name": "Qwen3.8 27B Uncensored (SGLang TP=2)",
-    "context_window": 262144,
+    "slug": "Qwen3.8-27B-Uncensored",
+    "display_name": "Qwen3.8 27B Uncensored (SGLang TP=2)",
+    "context_window": 150000,
+    "auto_compact_token_limit": 135000,
     "max_output_tokens": 32768,
     "default_output_tokens": 32768,
     "supports_reasoning_summaries": true,
