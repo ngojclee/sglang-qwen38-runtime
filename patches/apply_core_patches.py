@@ -2,7 +2,27 @@ import re, os, torch
 
 print("🚀 Applying Unified SGLang + Qwen 3.8 + DFlash2 Patches...")
 
-# 1. Patch compressed_tensors.py
+# 1. Patch hybrid_arch.py (Support Qwen3_5TextConfig / qwen3_5_text model_type)
+hybrid_arch_path = "/sgl-workspace/sglang/python/sglang/srt/configs/hybrid_arch.py"
+if os.path.exists(hybrid_arch_path):
+    with open(hybrid_arch_path, "r", encoding="utf-8") as f:
+        code_h = f.read()
+
+    target_h = """def hybrid_gdn_config(model_config: ModelConfig):
+    config = model_config.hf_config.get_text_config()
+    if isinstance("""
+    
+    repl_h = """def hybrid_gdn_config(model_config: ModelConfig):
+    config = model_config.hf_config.get_text_config()
+    if getattr(config, "model_type", "") in ("qwen3_5", "qwen3_5_text", "qwen3_next", "qwen3") or isinstance("""
+
+    if target_h in code_h and "getattr(config, \"model_type\", \"\")" not in code_h:
+        code_h = code_h.replace(target_h, repl_h, 1)
+        with open(hybrid_arch_path, "w", encoding="utf-8") as f:
+            f.write(code_h)
+        print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig support)")
+
+# 2. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
 if os.path.exists(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -24,7 +44,7 @@ if os.path.exists(file_path):
             f.write(code)
         print("✅ Patched compressed_tensors.py")
 
-# 2. Patch qwen3_5.py
+# 3. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
@@ -77,7 +97,7 @@ if os.path.exists(qwen35_path):
         f.write(code2)
     print("✅ Patched qwen3_5.py")
 
-# 3. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
+# 4. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
 wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 if os.path.exists(wNa16_path):
     with open(wNa16_path, "r", encoding="utf-8") as f:
@@ -192,7 +212,7 @@ if os.path.exists(wNa16_path):
         f.write(code3)
     print("✅ Patched compressed_tensors_wNa16.py")
 
-# 4. Patch dflash.py (DFlash2DraftModel class registration)
+# 5. Patch dflash.py (DFlash2DraftModel class registration)
 dflash_path = "/sgl-workspace/sglang/python/sglang/srt/models/dflash.py"
 if os.path.exists(dflash_path):
     with open(dflash_path, "r", encoding="utf-8") as f:
