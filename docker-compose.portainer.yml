@@ -198,10 +198,15 @@ services:
 
         async def is_node_healthy(target):
             try:
-                headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
-                async with httpx.AsyncClient(timeout=1.5) as c:
-                    r = await c.get(f"http://{target}/v1/models", headers=headers)
-                    return r.status_code in (200, 401)
+                # 1. Thử endpoint /health nhẹ và không bị lock GIL khi prefill lớn
+                async with httpx.AsyncClient(timeout=4.0) as c:
+                    r = await c.get(f"http://{target}/health")
+                    if r.status_code == 200:
+                        return True
+                    # 2. Fallback /v1/models
+                    headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
+                    r2 = await c.get(f"http://{target}/v1/models", headers=headers)
+                    return r2.status_code in (200, 401)
             except:
                 return False
 
@@ -215,42 +220,43 @@ services:
             except:
                 return False
 
-        # 4. Dynamic Cost-Aware Leader Resolution (Ưu tiên máy rẻ nhất)
+        # 4. Dynamic Cost-Aware Leader Resolution (Ưu tiên cố định máy rẻ nhất, chống nhảy qua lại)
         async def resolve_active_node():
             global current_active_node, last_activity
             last_activity = time.time()
-            await auto_sync_instances_from_vast()
             nodes = get_cluster_nodes()
 
             async with lock:
-                # Quét tất cả node theo thứ tự giá rẻ nhất
-                healthy_nodes = []
-                for node in nodes:
-                    if await is_node_healthy(node["target"]):
-                        healthy_nodes.append(node)
-
-                if healthy_nodes:
-                    best_node = healthy_nodes[0] # Máy khỏe có giá rẻ nhất
-                    if not current_active_node or current_active_node["target"] != best_node["target"]:
-                        print(f"🎯 Cost-Priority Leader selected: {best_node['target']} (Instance {best_node['instance_id']} - USD {best_node['price']}/hr)", flush=True)
-                        current_active_node = best_node
+                # Ưu tiên số 1: Kiểm tra máy rẻ nhất (nodes[0])
+                primary = nodes[0] if nodes else None
+                if primary and await is_node_healthy(primary["target"]):
+                    if not current_active_node or current_active_node["target"] != primary["target"]:
+                        print(f"🎯 Cost-Priority Leader locked: {primary['target']} (Instance {primary['instance_id']} - USD {primary['price']}/hr)", flush=True)
+                        current_active_node = primary
                     return current_active_node
 
+                # Nếu máy rẻ nhất tạm thời chưa sẵn sàng -> Thử các máy dự phòng tiếp theo
+                for fallback_node in nodes[1:]:
+                    if await is_node_healthy(fallback_node["target"]):
+                        if not current_active_node or current_active_node["target"] != fallback_node["target"]:
+                            print(f"⚠️ Primary node busy/offline. Fallback active: {fallback_node['target']} (Instance {fallback_node['instance_id']} - USD {fallback_node['price']}/hr)", flush=True)
+                            current_active_node = fallback_node
+                        return current_active_node
+
                 # Tất cả đều tắt -> Khởi động máy có giá rẻ nhất (nodes[0])
-                primary_candidate = nodes[0] if nodes else None
-                if primary_candidate and primary_candidate["instance_id"]:
-                    print(f"🚀 Cold-starting cheapest instance {primary_candidate['instance_id']} (USD {primary_candidate['price']}/hr)...", flush=True)
-                    await set_instance_state(primary_candidate["instance_id"], "running")
+                if primary and primary["instance_id"]:
+                    print(f"🚀 Cold-starting cheapest instance {primary['instance_id']} (USD {primary['price']}/hr)...", flush=True)
+                    await set_instance_state(primary["instance_id"], "running")
                     
                     start_t = time.time()
                     while time.time() - start_t < 90:
                         await asyncio.sleep(3)
-                        if await is_node_healthy(primary_candidate["target"]):
-                            print(f"🎉 Instance {primary_candidate['instance_id']} is now LIVE & ACTIVE!", flush=True)
-                            current_active_node = primary_candidate
+                        if await is_node_healthy(primary["target"]):
+                            print(f"🎉 Instance {primary['instance_id']} is now LIVE & ACTIVE!", flush=True)
+                            current_active_node = primary
                             return current_active_node
                 
-                return current_active_node or nodes[0]
+                return current_active_node or (nodes[0] if nodes else None)
 
         # 5. Quản lý dọn dẹp các máy thừa trên Vast.ai & tự tắt khi IDLE
         @app.on_event("startup")
