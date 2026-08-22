@@ -79,9 +79,7 @@ if os.path.exists(mem_pool_path):
     if target_err in code_mp:
         code_mp = code_mp.replace(target_err, repl_tf)
 
-    target_hl_move = """    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
-        self.full_kv_pool.move_kv_cache(tgt_loc, src_loc)"""
-
+    target_hl = "    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):\n        self.full_kv_pool.move_kv_cache(tgt_loc, src_loc)"
     prefix_valid_method = """    def set_kv_buffer_prefix_valid(
         self,
         layer: RadixAttention,
@@ -109,8 +107,8 @@ if os.path.exists(mem_pool_path):
     def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
         self.full_kv_pool.move_kv_cache(tgt_loc, src_loc)"""
 
-    if target_hl_move in code_mp:
-        code_mp = code_mp.replace(target_hl_move, prefix_valid_method, 1)
+    if target_hl in code_mp:
+        code_mp = code_mp.replace(target_hl, prefix_valid_method, 1)
 
     with open(mem_pool_path, "w", encoding="utf-8") as f:
         f.write(code_mp)
