@@ -115,7 +115,7 @@ services:
 
         sync_cpa_config()
 
-        # 2. Tự động quét Vast API để phát hiện mọi máy mới tạo và tự ghi vào instances.txt
+        # 2. Tự động quét Vast API để phát hiện mọi máy mới tạo, lấy giá dph và tự ghi vào instances.txt
         async def auto_sync_instances_from_vast():
             if not VAST_API_KEY:
                 return
@@ -127,13 +127,28 @@ services:
                     if resp.status_code == 200:
                         data = resp.json()
                         instances = data.get("instances", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                        
+                        def get_price(inst):
+                            p = inst.get("dph_total") or inst.get("dph_base") or inst.get("search", {}).get("dph")
+                            try:
+                                return float(p) if p is not None else 999.0
+                            except:
+                                return 999.0
+                        
+                        # Sắp xếp máy theo giá tăng dần (máy rẻ nhất đứng đầu)
+                        instances.sort(key=get_price)
+
                         new_lines = []
                         for inst in instances:
                             inst_id = inst.get("id")
                             ssh_host = inst.get("ssh_host")
                             ssh_port = inst.get("ssh_port")
+                            price = get_price(inst)
                             if inst_id and ssh_host and ssh_port:
-                                new_lines.append(f"{ssh_host} {ssh_port} {inst_id}")
+                                if price < 900:
+                                    new_lines.append(f"{ssh_host} {ssh_port} {inst_id} {price:.3f}")
+                                else:
+                                    new_lines.append(f"{ssh_host} {ssh_port} {inst_id}")
                         
                         if new_lines:
                             new_content = "\n".join(new_lines) + "\n"
@@ -146,11 +161,11 @@ services:
                                 os.makedirs(os.path.dirname(inst_path), exist_ok=True)
                                 with open(inst_path, "w", encoding="utf-8") as f:
                                     f.write(new_content)
-                                print(f"🔄 Auto-discovered and updated {len(new_lines)} instances from Vast API into {inst_path}!", flush=True)
+                                print(f"🔄 Auto-synced and cost-sorted {len(new_lines)} instances from Vast API into {inst_path}!", flush=True)
             except Exception as e:
                 print(f"⚠️ Error querying Vast API instances: {e}", flush=True)
 
-        # 3. Đọc danh sách máy từ instances.txt
+        # 3. Đọc danh sách máy từ instances.txt và sắp xếp theo ưu tiên giá rẻ nhất
         def get_cluster_nodes():
             nodes = []
             inst_path = "/etc/vast/instances.txt"
@@ -159,13 +174,25 @@ services:
                     lines = [l.strip() for l in f.readlines() if l.strip() and not l.startswith("#")]
                     for idx, line in enumerate(lines):
                         parts = line.split()
-                        inst_id = parts[2] if len(parts) >= 3 else None
-                        nodes.append({
-                            "target": f"vast-tunnel:{18001 + idx}",
-                            "instance_id": inst_id,
-                            "index": idx
-                        })
-            return nodes if nodes else [{"target": "vast-tunnel:18001", "instance_id": None, "index": 0}]
+                        if len(parts) >= 2:
+                            host = parts[0]
+                            port = parts[1]
+                            inst_id = str(parts[2]) if len(parts) >= 3 else None
+                            try:
+                                price = float(parts[3]) if len(parts) >= 4 else 999.0
+                            except:
+                                price = 999.0
+                            nodes.append({
+                                "target": f"vast-tunnel:{18001 + idx}",
+                                "instance_id": inst_id,
+                                "host": host,
+                                "port": port,
+                                "price": price,
+                                "index": idx
+                            })
+            # Sắp xếp danh sách máy theo giá tăng dần
+            nodes.sort(key=lambda x: x["price"])
+            return nodes if nodes else [{"target": "vast-tunnel:18001", "instance_id": None, "price": 999.0, "index": 0}]
 
         async def is_node_healthy(target):
             try:
@@ -186,7 +213,7 @@ services:
             except:
                 return False
 
-        # 4. Dynamic Leader Resolution (Chọn máy đang LIVE hoặc Cold-Start)
+        # 4. Dynamic Cost-Aware Leader Resolution (Ưu tiên máy rẻ nhất)
         async def resolve_active_node():
             global current_active_node, last_activity
             last_activity = time.time()
@@ -194,21 +221,23 @@ services:
             nodes = get_cluster_nodes()
 
             async with lock:
-                # Nếu node hiện tại vẫn sống -> tiếp tục dùng
-                if current_active_node and await is_node_healthy(current_active_node["target"]):
-                    return current_active_node
-
-                # Quét xem có máy nào khác đang LIVE không -> lấy làm máy chính ngay
+                # Quét tất cả node theo thứ tự giá rẻ nhất
+                healthy_nodes = []
                 for node in nodes:
                     if await is_node_healthy(node["target"]):
-                        print(f"🎯 Dynamic Active Node selected: {node['target']} (Instance {node['instance_id']})", flush=True)
-                        current_active_node = node
-                        return current_active_node
+                        healthy_nodes.append(node)
 
-                # Tất cả đều tắt -> Khởi động máy đầu tiên trong danh sách
+                if healthy_nodes:
+                    best_node = healthy_nodes[0] # Máy khỏe có giá rẻ nhất
+                    if not current_active_node or current_active_node["target"] != best_node["target"]:
+                        print(f"🎯 Cost-Priority Leader selected: {best_node['target']} (Instance {best_node['instance_id']} - ${best_node['price']}/hr)", flush=True)
+                        current_active_node = best_node
+                    return current_active_node
+
+                # Tất cả đều tắt -> Khởi động máy có giá rẻ nhất (nodes[0])
                 primary_candidate = nodes[0] if nodes else None
                 if primary_candidate and primary_candidate["instance_id"]:
-                    print(f"🚀 Cold-starting instance {primary_candidate['instance_id']}...", flush=True)
+                    print(f"🚀 Cold-starting cheapest instance {primary_candidate['instance_id']} (${primary_candidate['price']}/hr)...", flush=True)
                     await set_instance_state(primary_candidate["instance_id"], "running")
                     
                     start_t = time.time()
@@ -221,7 +250,7 @@ services:
                 
                 return current_active_node or nodes[0]
 
-        # 5. Quản lý dọn dẹp các máy thừa & tự tắt khi IDLE
+        # 5. Quản lý dọn dẹp các máy thừa trên Vast.ai & tự tắt khi IDLE
         @app.on_event("startup")
         async def start_auto_scaler():
             async def scaler_loop():
@@ -251,18 +280,27 @@ services:
                                     print(f"Error stopping instance: {e}", flush=True)
                         current_active_node = None
 
-                    # B. Chưa quá timeout: Chủ động chọn 1 máy làm Leader và TẮT ngay các máy thừa còn lại
+                    # B. Chưa quá timeout: Quét trực tiếp trên Vast API và TẮT ngay các máy không phải Leader
                     else:
-                        healthy_nodes = [n for n in nodes if await is_node_healthy(n["target"])]
-                        if healthy_nodes:
-                            if not current_active_node or not (await is_node_healthy(current_active_node["target"])):
-                                current_active_node = healthy_nodes[0]
-                                print(f"🎯 Active leader node set to: {current_active_node['target']} (Instance {current_active_node['instance_id']})", flush=True)
-                            
-                            for node in healthy_nodes:
-                                if node["target"] != current_active_node["target"] and node["instance_id"]:
-                                    print(f"💰 Auto-stopping redundant machine {node['instance_id']} (keeping single active node {current_active_node['instance_id']})...", flush=True)
-                                    await set_instance_state(node["instance_id"], "stopped")
+                        url = f"https://console.vast.ai/api/v0/instances/?api_key={VAST_API_KEY}"
+                        try:
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                resp = await client.get(url)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    api_insts = data.get("instances", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                                    for inst in api_insts:
+                                        inst_id = str(inst.get("id"))
+                                        actual_status = inst.get("actual_status") or inst.get("intended_status")
+                                        
+                                        # Nếu máy đang chạy trên Vast nhưng KHÔNG phải là Leader hiện tại -> Gửi lệnh STOP ngay
+                                        if actual_status == "running":
+                                            if not current_active_node or str(current_active_node.get("instance_id")) != inst_id:
+                                                leader_id = current_active_node.get('instance_id') if current_active_node else 'None'
+                                                print(f"💰 Auto-stopping redundant machine {inst_id} on Vast.ai (keeping single active leader {leader_id})...", flush=True)
+                                                await set_instance_state(inst_id, "stopped")
+                        except Exception as e:
+                            print(f"⚠️ Error checking redundant instances on Vast: {e}", flush=True)
             asyncio.create_task(scaler_loop())
 
         # 6. Direct Real-Time Streaming & Fast Reverse Proxy
