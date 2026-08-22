@@ -56,7 +56,7 @@ services:
           sleep 10
         done
 
-  # ===== 2. VAST GATEWAY (ROUTER SIÊU TỐC - TỰ ĐỘNG TẮT CÁC MÁY THỪA) =====
+  # ===== 2. VAST GATEWAY (DYNAMIC SINGLE-ACTIVE LEADER ROUTER & AUTO-SCALER) =====
   vast-gateway:
     image: python:3.11-alpine
     container_name: vast-gateway
@@ -89,10 +89,12 @@ services:
         PROVIDER_NAME = os.getenv("VAST_PROVIDER_NAME", "ln.vastai")
         IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
         
-        last_global_activity = time.time()
+        last_activity = time.time()
         active_requests = 0
+        current_active_node = None
+        lock = asyncio.Lock()
 
-        # 1. Đồng bộ config CPA cho đúng provider
+        # 1. Đồng bộ config CPA
         def sync_cpa_config():
             conf_path = "/cpa-config.yaml"
             if not os.path.exists(conf_path) or not API_LLM_SERVER:
@@ -126,79 +128,117 @@ services:
                         nodes.append({
                             "target": f"vast-tunnel:{18001 + idx}",
                             "instance_id": inst_id,
-                            "is_primary": (idx == 0)
+                            "index": idx
                         })
-            return nodes if nodes else [{"target": "vast-tunnel:18001", "instance_id": None, "is_primary": True}]
+            return nodes if nodes else [{"target": "vast-tunnel:18001", "instance_id": None, "index": 0}]
 
-        # 3. Quản lý tắt các máy thừa & tắt khi IDLE
+        async def is_node_healthy(target):
+            try:
+                headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
+                async with httpx.AsyncClient(timeout=1.5) as c:
+                    r = await c.get(f"http://{target}/v1/models", headers=headers)
+                    return r.status_code in (200, 401)
+            except:
+                return False
+
+        async def set_instance_state(inst_id, state):
+            if not VAST_API_KEY or not inst_id: return False
+            url = f"https://console.vast.ai/api/v0/instances/{inst_id}/?api_key={VAST_API_KEY}"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as c:
+                    r = await c.put(url, json={"state": state})
+                    return r.status_code == 200
+            except:
+                return False
+
+        # 3. Dynamic Leader Resolution (Chọn máy đang LIVE hoặc Cold-Start)
+        async def resolve_active_node():
+            global current_active_node, last_activity
+            last_activity = time.time()
+            nodes = get_cluster_nodes()
+
+            async with lock:
+                # Nếu node hiện tại vẫn sống -> tiếp tục dùng
+                if current_active_node and await is_node_healthy(current_active_node["target"]):
+                    return current_active_node
+
+                # Quét xem có máy nào khác đang LIVE không -> lấy làm máy chính ngay
+                for node in nodes:
+                    if await is_node_healthy(node["target"]):
+                        print(f"🎯 Dynamic Active Node selected: {node['target']} (Instance {node['instance_id']})", flush=True)
+                        current_active_node = node
+                        return current_active_node
+
+                # Tất cả đều tắt -> Khởi động máy đầu tiên trong danh sách
+                primary_candidate = nodes[0] if nodes else None
+                if primary_candidate and primary_candidate["instance_id"]:
+                    print(f"🚀 Cold-starting instance {primary_candidate['instance_id']}...", flush=True)
+                    await set_instance_state(primary_candidate["instance_id"], "running")
+                    
+                    start_t = time.time()
+                    while time.time() - start_t < 90:
+                        await asyncio.sleep(3)
+                        if await is_node_healthy(primary_candidate["target"]):
+                            print(f"🎉 Instance {primary_candidate['instance_id']} is now LIVE & ACTIVE!", flush=True)
+                            current_active_node = primary_candidate
+                            return current_active_node
+                
+                return current_active_node or nodes[0]
+
+        # 4. Quản lý dọn dẹp các máy thừa & tự tắt khi IDLE
         @app.on_event("startup")
-        async def start_auto_cleaner():
-            async def cleaner_loop():
+        async def start_auto_scaler():
+            async def scaler_loop():
+                global current_active_node
                 while True:
                     await asyncio.sleep(60)
                     if not VAST_API_KEY or active_requests > 0:
                         continue
                     
-                    idle_seconds = time.time() - last_global_activity
+                    idle_seconds = time.time() - last_activity
                     nodes = get_cluster_nodes()
 
+                    # A. Tắt máy nếu không có ai dùng quá IDLE_TIMEOUT_MINUTES
                     if idle_seconds > (IDLE_TIMEOUT_MINUTES * 60):
                         for node in nodes:
                             if node["instance_id"]:
                                 try:
-                                    async with httpx.AsyncClient(timeout=10) as c:
-                                        await c.put(f"https://console.vast.ai/api/v0/instances/{node['instance_id']}/?api_key={VAST_API_KEY}", json={"state": "stopped"})
-                                        print(f"💤 All idle > {IDLE_TIMEOUT_MINUTES}m. Stopped instance {node['instance_id']}", flush=True)
+                                    await set_instance_state(node["instance_id"], "stopped")
+                                    print(f"💤 All idle > {IDLE_TIMEOUT_MINUTES}m. Stopped instance {node['instance_id']}", flush=True)
                                 except Exception as e:
                                     print(f"Error stopping instance: {e}", flush=True)
-                    
-                    elif len(nodes) > 1:
-                        primary_live = False
-                        try:
-                            headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
-                            async with httpx.AsyncClient(timeout=2) as c:
-                                r = await c.get(f"http://{nodes[0]['target']}/v1/models", headers=headers)
-                                primary_live = (r.status_code in (200, 401))
-                        except:
-                            primary_live = False
-                        
-                        if primary_live:
-                            for node in nodes[1:]:
-                                if node["instance_id"]:
-                                    try:
-                                        async with httpx.AsyncClient(timeout=10) as c:
-                                            await c.put(f"https://console.vast.ai/api/v0/instances/{node['instance_id']}/?api_key={VAST_API_KEY}", json={"state": "stopped"})
-                                            print(f"💰 Primary active. Stopped redundant secondary instance {node['instance_id']}!", flush=True)
-                                    except:
-                                        pass
-            asyncio.create_task(cleaner_loop())
+                        current_active_node = None
 
-        # 4. Direct Fast Reverse Proxy
+                    # B. Nếu đang có máy phục vụ -> Tắt tất cả các máy thừa khác
+                    elif current_active_node:
+                        for node in nodes:
+                            if node["target"] != current_active_node["target"] and node["instance_id"]:
+                                if await is_node_healthy(node["target"]):
+                                    print(f"💰 Auto-stopping redundant machine {node['instance_id']} to keep single active node...", flush=True)
+                                    await set_instance_state(node["instance_id"], "stopped")
+            asyncio.create_task(scaler_loop())
+
+        # 5. Direct Fast Reverse Proxy
         @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
         async def proxy(req: Request, path: str):
-            global last_global_activity, active_requests
-            last_global_activity = time.time()
+            global last_activity, active_requests
+            last_activity = time.time()
             active_requests += 1
             
             try:
-                nodes = get_cluster_nodes()
+                node = await resolve_active_node()
+                target_url = f"http://{node['target']}/{path}"
+                if req.url.query: target_url += f"?{req.url.query}"
+                
                 body = await req.body()
                 headers = {k: v for k, v in req.headers.items() if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
                 
                 async with httpx.AsyncClient(timeout=600.0) as client:
-                    for node in nodes:
-                        try:
-                            url = f"http://{node['target']}/{path}"
-                            if req.url.query: url += f"?{req.url.query}"
-                            
-                            resp = await client.request(method=req.method, url=url, headers=headers, content=body)
-                            resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
-                            return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers, media_type=resp.headers.get("content-type"))
-                        except Exception as e:
-                            print(f"Target {node['target']} err: {e}", flush=True)
-                            continue
-                    
-                    return Response(content=b'{"error": "No reachable Vast instance in pool"}', status_code=503)
+                    resp = await client.request(method=req.method, url=target_url, headers=headers, content=body)
+                    resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
+                    return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers, media_type=resp.headers.get("content-type"))
+            except Exception as e:
+                return Response(content=f'{{"error": "Failed communicating with active instance: {e}"}}'.encode(), status_code=503)
             finally:
                 active_requests = max(0, active_requests - 1)
         EOF
