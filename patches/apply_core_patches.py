@@ -74,11 +74,8 @@ if os.path.exists(qwen35_path):
         print("Patched qwen3_5.py get_layer via regex!")
 
     # B. Fix num_experts in get_model_config_for_expert_location
-    target_expert = "num_logical_experts=config.num_experts,"
-    replacement_expert = "num_logical_experts=getattr(config, 'num_experts', 0),"
-    if target_expert in code2:
-        code2 = code2.replace(target_expert, replacement_expert)
-        print("Patched qwen3_5.py num_experts fallback successfully!")
+    code2 = re.sub(r'num_logical_experts=.*?,', "num_logical_experts=getattr(config, 'num_experts', 0),", code2)
+    print("Patched qwen3_5.py num_experts fallback successfully!")
 
     # C. EntryClass registration
     if "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]" in code2:
