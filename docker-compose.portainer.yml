@@ -79,9 +79,9 @@ services:
       - |
         pip install --no-cache-dir fastapi uvicorn httpx
         cat << 'EOF' > /app.py
-        import asyncio, os, time, re, httpx
+        import asyncio, os, time, re, json, httpx
         from fastapi import FastAPI, Request
-        from fastapi.responses import Response
+        from fastapi.responses import Response, StreamingResponse
 
         app = FastAPI()
         VAST_API_KEY = os.getenv("VAST_API_KEY", "")
