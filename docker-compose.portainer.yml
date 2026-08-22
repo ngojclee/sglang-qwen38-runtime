@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  # ============================================================================
+  # 1. Codex Proxy Adapter (CPA / cli-proxy-api)
+  # ============================================================================
+  cli-proxy-api:
+    image: ghcr.io/router-for-me/cli-proxy-api:latest
+    container_name: cli-proxy-api
+    restart: always
+    ports:
+      - "8317:8317"
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./auth:/root/.cli-proxy-api
+    depends_on:
+      - vast-auto-scaler
+
+  # ============================================================================
+  # 2. Vast.ai On-Demand Auto-Scaler Gateway (Auto-Start / Auto-Sleep Router)
+  # ============================================================================
+  vast-auto-scaler:
+    build:
+      context: ./docker/vast-auto-scaler
+      dockerfile: Dockerfile
+    container_name: vast-auto-scaler
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - VAST_API_KEY=${VAST_API_KEY:-}
+      - INSTANCE_POOL=${INSTANCE_POOL:-13887}
+      - TARGET_PORT=18000
+      - IDLE_TIMEOUT_MINUTES=20
+      - HEALTH_CHECK_TIMEOUT_SECS=180
+
+  # ============================================================================
+  # 3. Cloudflare Tunnel (Optional: Secure Edge Network)
+  # ============================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared-tunnel
+    restart: always
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    environment:
+      - TUNNEL_METRICS=0.0.0.0:2000
