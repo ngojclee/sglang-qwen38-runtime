@@ -5,31 +5,75 @@ networks:
     driver: bridge
 
 services:
-  # ===== 1. MULTI-TUNNEL SIDECAR (DUY TRÌ KẾT NỐI SSH LIÊN TỤC) =====
+  # ===== 1. DYNAMIC TUNNEL MANAGER (TỰ ĐỌC FILE INSTANCES.TXT & AUTO-SYNC KEY) =====
   vast-tunnel:
     image: alpine:latest
     restart: unless-stopped
     container_name: vast-tunnel
     networks:
       - vast-net
+    environment:
+      - API_LLM_SERVER=${API_LLM_SERVER:-440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55}
     volumes:
       - /home/Docker/vast-tunnel/ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/Docker/vast-tunnel/ssh/known_hosts:/root/.ssh/known_hosts:rw
+      - /home/Docker/vast-tunnel/instances.txt:/etc/vast/instances.txt:rw
     command:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache openssh-client
-        # Machine D (Forward cổng nội bộ 18001 sang Máy D)
-        (while true; do ssh -q -N -g -L 0.0.0.0:18001:127.0.0.1:18000 -o GatewayPorts=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887 2>/dev/null; sleep 5; done) &
-        wait
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "2"
+        apk add --no-cache openssh-client sed grep procps
+        mkdir -p /etc/vast
+        touch /etc/vast/instances.txt
 
-  # ===== 2. VAST GATEWAY (ROUTER SIÊU TỐC - ZERO LATENCY - TỰ ĐỘNG TẮT KHI IDLE) =====
+        echo "🚀 Dynamic Tunnel Manager started. Watching /etc/vast/instances.txt..."
+        
+        while true; do
+          PORT_INDEX=18001
+          while read -r line || [ -n "$$line" ]; do
+            case "$$line" in \#*|"") continue ;; esac
+            
+            HOST=$$(echo "$$line" | awk '{print $$1}')
+            PORT=$$(echo "$$line" | awk '{print $$2}')
+            
+            if [ -n "$$HOST" ] && [ -n "$$PORT" ]; then
+              if ! pgrep -f "0.0.0.0:$$PORT_INDEX:127.0.0.1:18000" > /dev/null 2>&1; then
+                echo "🔗 Opening tunnel on port $$PORT_INDEX to $$HOST:$$PORT..."
+                
+                # 1. Đồng bộ key tự động vào máy đích
+                if [ -n "$$API_LLM_SERVER" ]; then
+                  ssh -q -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 -p $$PORT root@$$HOST "
+                    if [ -f /etc/sglang-args.conf ]; then
+                      if ! grep -q -- \"--api-key $$API_LLM_SERVER\" /etc/sglang-args.conf; then
+                        sed -i 's/--api-key [^ ]*//g' /etc/sglang-args.conf
+                        sed -i \"s/$/ --api-key $$API_LLM_SERVER/\" /etc/sglang-args.conf
+                        supervisorctl restart sglang 2>/dev/null || true
+                      fi
+                    fi
+                  " 2>/dev/null || true
+                fi
+
+                # 2. Duy trì kết nối SSH Tunnel
+                (while true; do
+                  ssh -q -N -g -L 0.0.0.0:$$PORT_INDEX:127.0.0.1:18000 \
+                      -o GatewayPorts=yes \
+                      -o ServerAliveInterval=15 \
+                      -o ServerAliveCountMax=3 \
+                      -o ExitOnForwardFailure=yes \
+                      -o StrictHostKeyChecking=accept-new \
+                      -o UserKnownHostsFile=/root/.ssh/known_hosts \
+                      -i /root/.ssh/id_ed25519 \
+                      -p $$PORT root@$$HOST 2>/dev/null || sleep 5
+                  sleep 5
+                done) &
+              fi
+              PORT_INDEX=$$((PORT_INDEX + 1))
+            fi
+          done < /etc/vast/instances.txt
+          sleep 10
+        done
+
+  # ===== 2. VAST GATEWAY (ROUTER SIÊU TỐC - TỰ ĐỘNG QUÉT DANH SÁCH MÁY) =====
   vast-gateway:
     image: python:3.11-alpine
     container_name: vast-gateway
@@ -43,9 +87,9 @@ services:
       - API_LLM_SERVER=${API_LLM_SERVER:-440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55}
       - VAST_PROVIDER_NAME=${VAST_PROVIDER_NAME:-ln.vastai}
       - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-30}
-      - BACKEND_TARGET=vast-tunnel:18001
     volumes:
       - /home/Docker/CLIProxyAPI/config.yaml:/cpa-config.yaml:rw
+      - /home/Docker/vast-tunnel/instances.txt:/etc/vast/instances.txt:ro
     entrypoint:
       - /bin/sh
       - -c
@@ -53,18 +97,17 @@ services:
         pip install --no-cache-dir fastapi uvicorn httpx
         cat << 'EOF' > /app.py
         import asyncio, os, time, re, httpx
-        from fastapi import FastAPI, Request, Response
-        from fastapi.responses import Response, StreamingResponse
+        from fastapi import FastAPI, Request
+        from fastapi.responses import Response
 
         app = FastAPI()
         VAST_API_KEY = os.getenv("VAST_API_KEY", "")
         API_LLM_SERVER = os.getenv("API_LLM_SERVER", "")
         PROVIDER_NAME = os.getenv("VAST_PROVIDER_NAME", "ln.vastai")
-        BACKEND = os.getenv("BACKEND_TARGET", "vast-tunnel:18001")
         IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
         last_activity = time.time()
 
-        # 1. Tự động đồng bộ config.yaml cho CPA
+        # 1. Đồng bộ config CPA
         def sync_cpa_config():
             conf_path = "/cpa-config.yaml"
             if not os.path.exists(conf_path) or not API_LLM_SERVER:
@@ -85,53 +128,41 @@ services:
 
         sync_cpa_config()
 
-        # 2. Quản lý tắt máy khi IDLE
-        @app.on_event("startup")
-        async def start_idle_watcher():
-            async def idle_loop():
-                while True:
-                    await asyncio.sleep(60)
-                    inst_id = os.getenv("INSTANCE_ID", "")
-                    if VAST_API_KEY and inst_id and (time.time() - last_activity > IDLE_TIMEOUT_MINUTES * 60):
-                        try:
-                            async with httpx.AsyncClient(timeout=10) as c:
-                                await c.put(f"https://console.vast.ai/api/v0/instances/{inst_id}/?api_key={VAST_API_KEY}", json={"state": "stopped"})
-                                print(f"💤 Stopped idle instance {inst_id} after {IDLE_TIMEOUT_MINUTES}m", flush=True)
-                        except Exception as e:
-                            print(f"Error stopping instance: {e}", flush=True)
-            asyncio.create_task(idle_loop())
+        # 2. Lấy danh sách backend động từ instances.txt
+        def get_backend_targets():
+            targets = []
+            inst_path = "/etc/vast/instances.txt"
+            if os.path.exists(inst_path):
+                with open(inst_path, "r") as f:
+                    lines = [l.strip() for l in f.readlines() if l.strip() and not l.startswith("#")]
+                    for idx, _ in enumerate(lines):
+                        targets.append(f"vast-tunnel:{18001 + idx}")
+            return targets if targets else ["vast-tunnel:18001"]
 
-        # 3. Direct Fast Streaming Proxy
+        # 3. Direct Fast Reverse Proxy
         @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
         async def proxy(req: Request, path: str):
             global last_activity
             last_activity = time.time()
             
-            target_url = f"http://{BACKEND}/{path}"
-            if req.url.query:
-                target_url += f"?{req.url.query}"
-            
+            backends = get_backend_targets()
             body = await req.body()
+            headers = {k: v for k, v in req.headers.items() if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
             
-            headers = {}
-            for k, v in req.headers.items():
-                if k.lower() not in ("host", "content-length", "connection", "accept-encoding"):
-                    headers[k] = v
-
             async with httpx.AsyncClient(timeout=600.0) as client:
-                resp = await client.request(
-                    method=req.method,
-                    url=target_url,
-                    headers=headers,
-                    content=body
-                )
-                resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    headers=resp_headers,
-                    media_type=resp.headers.get("content-type")
-                )
+                for target in backends:
+                    try:
+                        url = f"http://{target}/{path}"
+                        if req.url.query: url += f"?{req.url.query}"
+                        
+                        resp = await client.request(method=req.method, url=url, headers=headers, content=body)
+                        resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
+                        return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers, media_type=resp.headers.get("content-type"))
+                    except Exception as e:
+                        print(f"Target {target} failed: {e}", flush=True)
+                        continue
+                
+                return Response(content=b'{"error": "No reachable Vast instance in pool"}', status_code=503)
         EOF
         python -m uvicorn app:app --host 0.0.0.0 --port 18000
 
