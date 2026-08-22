@@ -61,8 +61,8 @@ BASE_MODEL_PATH="/root/models/hotdogs-Qwen3.8-27B-AWQ-INT4"
 DFLASH_MODEL_PATH="/root/models/Qwen3.8-27B-DFlash2"
 
 if [ ! -d "$BASE_MODEL_PATH" ]; then
-    echo "📥 Downloading Base Model: hotdog/Qwen3.8-27B-AWQ-INT4..."
-    git clone https://huggingface.co/hotdog/Qwen3.8-27B-AWQ-INT4 "$BASE_MODEL_PATH" || true
+    echo "📥 Downloading Base Model: hotdogs/Qwen3.8-27B-abliterated-AWQ-INT4..."
+    git clone https://huggingface.co/hotdogs/Qwen3.8-27B-abliterated-AWQ-INT4 "$BASE_MODEL_PATH" || true
 fi
 
 if [ ! -d "$DFLASH_MODEL_PATH" ]; then
