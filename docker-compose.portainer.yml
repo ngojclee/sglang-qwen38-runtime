@@ -13,7 +13,7 @@ services:
     networks:
       - vast-net
     environment:
-      - API_LLM_SERVER=${API_LLM_SERVER:-440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55}
+      - API_LLM_SERVER=${API_LLM_SERVER}
     volumes:
       - /home/Docker/vast-tunnel/ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/Docker/vast-tunnel/ssh/known_hosts:/root/.ssh/known_hosts:rw
@@ -73,7 +73,7 @@ services:
           sleep 10
         done
 
-  # ===== 2. VAST GATEWAY (ROUTER SIÊU TỐC - TỰ ĐỘNG QUÉT DANH SÁCH MÁY) =====
+  # ===== 2. VAST GATEWAY (ROUTER SIÊU TỐC - TỰ ĐỘNG TẮT CÁC MÁY THỪA) =====
   vast-gateway:
     image: python:3.11-alpine
     container_name: vast-gateway
@@ -84,8 +84,8 @@ services:
       - "18000:18000"
     environment:
       - VAST_API_KEY=${VAST_API_KEY}
-      - API_LLM_SERVER=${API_LLM_SERVER:-440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55}
-      - VAST_PROVIDER_NAME=${VAST_PROVIDER_NAME:-ln.vastai}
+      - API_LLM_SERVER=${API_LLM_SERVER}
+      - VAST_PROVIDER_NAME=${VAST_PROVIDER_NAME}
       - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-30}
     volumes:
       - /home/Docker/CLIProxyAPI/config.yaml:/cpa-config.yaml:rw
@@ -105,9 +105,11 @@ services:
         API_LLM_SERVER = os.getenv("API_LLM_SERVER", "")
         PROVIDER_NAME = os.getenv("VAST_PROVIDER_NAME", "ln.vastai")
         IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
-        last_activity = time.time()
+        
+        last_global_activity = time.time()
+        active_requests = 0
 
-        # 1. Đồng bộ config CPA
+        # 1. Đồng bộ config CPA cho đúng provider
         def sync_cpa_config():
             conf_path = "/cpa-config.yaml"
             if not os.path.exists(conf_path) or not API_LLM_SERVER:
@@ -128,41 +130,97 @@ services:
 
         sync_cpa_config()
 
-        # 2. Lấy danh sách backend động từ instances.txt
-        def get_backend_targets():
-            targets = []
+        # 2. Đọc danh sách máy (Host, Port, Instance_ID)
+        def get_cluster_nodes():
+            nodes = []
             inst_path = "/etc/vast/instances.txt"
             if os.path.exists(inst_path):
                 with open(inst_path, "r") as f:
                     lines = [l.strip() for l in f.readlines() if l.strip() and not l.startswith("#")]
-                    for idx, _ in enumerate(lines):
-                        targets.append(f"vast-tunnel:{18001 + idx}")
-            return targets if targets else ["vast-tunnel:18001"]
+                    for idx, line in enumerate(lines):
+                        parts = line.split()
+                        inst_id = parts[2] if len(parts) >= 3 else None
+                        nodes.append({
+                            "target": f"vast-tunnel:{18001 + idx}",
+                            "instance_id": inst_id,
+                            "is_primary": (idx == 0)
+                        })
+            return nodes if nodes else [{"target": "vast-tunnel:18001", "instance_id": None, "is_primary": True}]
 
-        # 3. Direct Fast Reverse Proxy
+        # 3. Quản lý tắt các máy thừa & tắt khi IDLE
+        @app.on_event("startup")
+        async def start_auto_cleaner():
+            async def cleaner_loop():
+                while True:
+                    await asyncio.sleep(60)
+                    if not VAST_API_KEY or active_requests > 0:
+                        continue
+                    
+                    idle_seconds = time.time() - last_global_activity
+                    nodes = get_cluster_nodes()
+
+                    # A. Nếu tất cả đều idle > timeout -> Tắt toàn bộ
+                    if idle_seconds > (IDLE_TIMEOUT_MINUTES * 60):
+                        for node in nodes:
+                            if node["instance_id"]:
+                                try:
+                                    async with httpx.AsyncClient(timeout=10) as c:
+                                        await c.put(f"https://console.vast.ai/api/v0/instances/{node['instance_id']}/?api_key={VAST_API_KEY}", json={"state": "stopped"})
+                                        print(f"💤 All idle > {IDLE_TIMEOUT_MINUTES}m. Stopped instance {node['instance_id']}", flush=True)
+                                except Exception as e:
+                                    print(f"Error stopping instance: {e}", flush=True)
+                    
+                    # B. Nếu đang có nhiều máy cùng live -> Tắt các máy phụ thừa, chỉ giữ 1 máy chính
+                    elif len(nodes) > 1:
+                        # Kiểm tra máy chính (Primary) có live không
+                        primary_live = False
+                        try:
+                            headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
+                            async with httpx.AsyncClient(timeout=2) as c:
+                                r = await c.get(f"http://{nodes[0]['target']}/v1/models", headers=headers)
+                                primary_live = (r.status_code in (200, 401))
+                        except:
+                            primary_live = False
+                        
+                        # Nếu máy chính đang live gánh tải -> Tắt các máy phụ thừa để tiết kiệm tiền
+                        if primary_live:
+                            for node in nodes[1:]:
+                                if node["instance_id"]:
+                                    try:
+                                        async with httpx.AsyncClient(timeout=10) as c:
+                                            await c.put(f"https://console.vast.ai/api/v0/instances/{node['instance_id']}/?api_key={VAST_API_KEY}", json={"state": "stopped"})
+                                            print(f"💰 Primary node is active. Auto-stopped redundant secondary instance {node['instance_id']}!", flush=True)
+                                    except:
+                                        pass
+            asyncio.create_task(cleaner_loop())
+
+        # 4. Direct Fast Reverse Proxy
         @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
         async def proxy(req: Request, path: str):
-            global last_activity
-            last_activity = time.time()
+            global last_global_activity, active_requests
+            last_global_activity = time.time()
+            active_requests += 1
             
-            backends = get_backend_targets()
-            body = await req.body()
-            headers = {k: v for k, v in req.headers.items() if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
-            
-            async with httpx.AsyncClient(timeout=600.0) as client:
-                for target in backends:
-                    try:
-                        url = f"http://{target}/{path}"
-                        if req.url.query: url += f"?{req.url.query}"
-                        
-                        resp = await client.request(method=req.method, url=url, headers=headers, content=body)
-                        resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
-                        return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers, media_type=resp.headers.get("content-type"))
-                    except Exception as e:
-                        print(f"Target {target} failed: {e}", flush=True)
-                        continue
+            try:
+                nodes = get_cluster_nodes()
+                body = await req.body()
+                headers = {k: v for k, v in req.headers.items() if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
                 
-                return Response(content=b'{"error": "No reachable Vast instance in pool"}', status_code=503)
+                async with httpx.AsyncClient(timeout=600.0) as client:
+                    for node in nodes:
+                        try:
+                            url = f"http://{node['target']}/{path}"
+                            if req.url.query: url += f"?{req.url.query}"
+                            
+                            resp = await client.request(method=req.method, url=url, headers=headers, content=body)
+                            resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
+                            return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers, media_type=resp.headers.get("content-type"))
+                        except Exception as e:
+                            continue
+                    
+                    return Response(content=b'{"error": "No reachable Vast instance in pool"}', status_code=503)
+            finally:
+                active_requests = max(0, active_requests - 1)
         EOF
         python -m uvicorn app:app --host 0.0.0.0 --port 18000
 
