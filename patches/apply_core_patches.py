@@ -67,7 +67,7 @@ if os.path.exists(trans_qwen35):
                 f.write(code_t)
             print("✅ Patched transformers configuration_qwen3_5.py directly")
 
-# 2. Patch memory_pool.py (_transfer_full_attention_id fallback)
+# 2. Patch memory_pool.py (_transfer_full_attention_id fallback + set_kv_buffer_prefix_valid for HybridLinearKVPool)
 mem_pool_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py"
 if os.path.exists(mem_pool_path):
     with open(mem_pool_path, "r", encoding="utf-8") as f:
@@ -78,9 +78,39 @@ if os.path.exists(mem_pool_path):
 
     if target_err in code_mp:
         code_mp = code_mp.replace(target_err, repl_tf)
-        with open(mem_pool_path, "w", encoding="utf-8") as f:
-            f.write(code_mp)
-        print("✅ Patched memory_pool.py (_transfer_full_attention_id fallback)")
+
+    prefix_valid_method = """    def set_kv_buffer_prefix_valid(
+        self,
+        layer: RadixAttention,
+        loc_2d: torch.Tensor,
+        commit_lens: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        k_scale: Optional[float] = None,
+        v_scale: Optional[float] = None,
+        **kwargs,
+    ):
+        layer_id = self._transfer_full_attention_id(layer.layer_id)
+        return self.full_kv_pool.set_kv_buffer_prefix_valid(
+            layer=layer,
+            loc_2d=loc_2d,
+            commit_lens=commit_lens,
+            cache_k=cache_k,
+            cache_v=cache_v,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            layer_id_override=layer_id,
+            **kwargs,
+        )
+
+    def move_kv_cache("""
+
+    if "def move_kv_cache(" in code_mp and "def set_kv_buffer_prefix_valid(" not in code_mp.split("class HybridLinearKVPool")[1]:
+        code_mp = code_mp.replace("    def move_kv_cache(", prefix_valid_method, 1)
+
+    with open(mem_pool_path, "w", encoding="utf-8") as f:
+        f.write(code_mp)
+    print("✅ Patched memory_pool.py (_transfer_full_attention_id + set_kv_buffer_prefix_valid)")
 
 # 3. Patch hybrid_linear_attn_backend.py (Support draft/pure attention models without mixed_qkv)
 hybrid_backend_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py"
