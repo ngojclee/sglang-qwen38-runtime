@@ -70,6 +70,7 @@ services:
       - API_LLM_SERVER=${API_LLM_SERVER}
       - VAST_PROVIDER_NAME=${VAST_PROVIDER_NAME}
       - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-30}
+      - LANGUAGE_PROMPT=${LANGUAGE_PROMPT:-Always communicate and explain in Vietnamese (Tiếng Việt). Keep code syntax, terminal commands, variable names, and programming technical terms in English.}
     volumes:
       - /home/Docker/CLIProxyAPI/config.yaml:/cpa-config.yaml:rw
       - /home/Docker/vast-tunnel/instances.txt:/etc/vast/instances.txt:rw
@@ -88,6 +89,7 @@ services:
         API_LLM_SERVER = os.getenv("API_LLM_SERVER", "")
         PROVIDER_NAME = os.getenv("VAST_PROVIDER_NAME", "ln.vastai")
         IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
+        LANGUAGE_PROMPT = os.getenv("LANGUAGE_PROMPT", "")
         
         last_activity = time.time()
         active_requests = 0
@@ -323,6 +325,14 @@ services:
                     if req.method == "POST" and body:
                         payload = json.loads(body.decode("utf-8"))
                         is_stream = bool(payload.get("stream", False))
+                        messages = payload.get("messages", [])
+                        if messages and LANGUAGE_PROMPT:
+                            if messages[0].get("role") == "system":
+                                if LANGUAGE_PROMPT not in messages[0].get("content", ""):
+                                    messages[0]["content"] += f"\n\n{LANGUAGE_PROMPT}"
+                            else:
+                                messages.insert(0, {"role": "system", "content": LANGUAGE_PROMPT})
+                            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 except:
                     pass
 
