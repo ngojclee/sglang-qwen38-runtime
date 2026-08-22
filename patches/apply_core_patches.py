@@ -45,7 +45,7 @@ except Exception as e:
         f.write(code_h)
     print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & registration)")
 
-# 2. Patch kv_cache_configurator.py (_handle_max_mamba_cache guard for non-Mamba2)
+# 2. Patch kv_cache_configurator.py (_handle_max_mamba_cache guard + resolve_max_num_reqs None guard)
 kv_config_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py"
 if os.path.exists(kv_config_path):
     with open(kv_config_path, "r", encoding="utf-8") as f:
@@ -68,9 +68,15 @@ if os.path.exists(kv_config_path):
     if "if not hasattr(config, \"mamba2_cache_params\")" not in code_k:
         code_k = re.sub(pattern_k, repl_k, code_k, count=1)
 
+    # Guard self.server_args.max_mamba_cache_size // ratio
+    target_reqs = "if self.mambaish_config is not None:"
+    repl_reqs = "if self.mambaish_config is not None and self.server_args.max_mamba_cache_size is not None:"
+    if target_reqs in code_k and repl_reqs not in code_k:
+        code_k = code_k.replace(target_reqs, repl_reqs, 1)
+
     with open(kv_config_path, "w", encoding="utf-8") as f:
         f.write(code_k)
-    print("✅ Patched kv_cache_configurator.py (_handle_max_mamba_cache guard)")
+    print("✅ Patched kv_cache_configurator.py (Mamba guards)")
 
 # 3. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
 model_config_path = "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py"
