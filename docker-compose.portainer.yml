@@ -5,7 +5,7 @@ networks:
     driver: bridge
 
 services:
-  # ===== 1. MULTI-TUNNEL SIDECAR (DÙNG ALPINE - GỘP TẤT CẢ CÁC MÁY) =====
+  # ===== 1. MULTI-TUNNEL SIDECAR (KẾT NỐI SSH TẤT CẢ CÁC MÁY) =====
   vast-tunnel:
     image: alpine:latest
     restart: unless-stopped
@@ -20,8 +20,10 @@ services:
       - -c
       - |
         apk add --no-cache openssh-client
-        (while true; do ssh -N -L 0.0.0.0:18000:127.0.0.1:18000 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh5.vast.ai -p 15185; sleep 3; done) &
-        (while true; do ssh -N -L 0.0.0.0:18001:127.0.0.1:18000 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887; sleep 3; done) &
+        # Machine D (Live hiện tại) -> forward ra cổng 18001
+        (while true; do ssh -N -L 0.0.0.0:18001:127.0.0.1:18000 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887; sleep 5; done) &
+        # Machine C (Khi nào bật sẽ tự connect) -> forward ra cổng 18002
+        (while true; do ssh -N -L 0.0.0.0:18002:127.0.0.1:18000 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh5.vast.ai -p 15185; sleep 10; done) &
         wait
     logging:
       driver: json-file
@@ -29,7 +31,50 @@ services:
         max-size: "10m"
         max-file: "2"
 
-  # ===== 2. CLIPROXYAPI =====
+  # ===== 2. VAST GATEWAY (TỰ QUÉT VÀ ĐẨY REQUEST VỀ MÁY LIVE) =====
+  vast-gateway:
+    image: haproxy:alpine
+    container_name: vast-gateway
+    restart: unless-stopped
+    user: root
+    networks:
+      - vast-net
+    ports:
+      - "18000:18000"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat << 'EOF' > /tmp/haproxy.cfg
+        global
+            log stdout format raw local0
+            maxconn 4096
+
+        defaults
+            log     global
+            mode    http
+            option  httplog
+            option  dontlognull
+            timeout connect 5000ms
+            timeout client  600000ms
+            timeout server  600000ms
+
+        frontend sglang_in
+            bind *:18000
+            default_backend sglang_pool
+
+        backend sglang_pool
+            mode http
+            balance roundrobin
+            option httpchk GET /v1/models
+            http-check expect status 200
+            default-server check inter 3s fall 2 rise 1
+            server machine_d vast-tunnel:18001 check
+            server machine_c vast-tunnel:18002 check
+        EOF
+        haproxy -f /tmp/haproxy.cfg
+
+  # ===== 3. CLIPROXYAPI (CPA) =====
   cli-proxy-api:
     image: eceasy/cli-proxy-api:latest
     pull_policy: always
@@ -38,30 +83,27 @@ services:
     init: true
     networks:
       - vast-net
-
+    depends_on:
+      - vast-gateway
     ports:
       - "8317:8317"
       - "127.0.0.1:1455:1455"
-
     environment:
       TZ: ${TZ:-Europe/Paris}
       MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD}
       OPENCODEX_DEVICE_ID_PATH: ${OPENCODEX_DEVICE_ID_PATH:-/data/opencodex/device-id}
       CPA_PLUGIN_GITHUB_TOKEN: "${CPA_PLUGIN_GITHUB_TOKEN}"
       CPA_CODEX_COMPACTION_KEY: "${CPA_CODEX_COMPACTION_KEY}"
-
     volumes:
       - /home/Docker/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml:rw
       - /home/Docker/CLIProxyAPI/.cli-proxy-api:/root/.cli-proxy-api:rw
       - /home/Docker/CLIProxyAPI/plugins:/CLIProxyAPI/plugins:rw
       - /home/Docker/CLIProxyAPI/logs:/CLIProxyAPI/logs:rw
       - /home/Docker/CLIProxyAPI/opencodex:/data/opencodex:rw
-
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
-
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
