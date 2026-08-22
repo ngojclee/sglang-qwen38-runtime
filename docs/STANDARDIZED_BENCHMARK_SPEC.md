@@ -86,7 +86,7 @@ Khi đo kiểm xong trên bất kỳ cấu hình nào (Máy A, B, C, D hoặc b�
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Máy D (2× 3090) + DFlash2 ON** | **91.53 tok/s** | ✅ PASS | ✅ PASS | ❌ FAIL (OOM 75K) | ❌ FAIL | ❌ FAIL | ✅ PASS (0.79s) |
 | **Máy D (2× 3090) + DFlash2 OFF** | **52.62 tok/s** | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS (HiCache) | ✅ PASS (262K) | ✅ PASS (1.05s) |
-| **Máy C (4× 5060Ti) + DFlash2 ON** | **75.20 tok/s** | ✅ PASS | ✅ PASS | ✅ PASS (180K) | ✅ PASS (180K) | ⚠️ HiCache | ✅ PASS (0.82s) |
-| **Máy C (4× 5060Ti) + DFlash2 OFF**| **40.40 tok/s** | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS (427K) | ✅ PASS (427K) | ✅ PASS (1.10s) |
+| **Máy C (4× 5060Ti) + DFlash2 ON** | 🏆 **77.81 tok/s** | ✅ PASS (2.14s) | ✅ PASS (4.12s) | ✅ PASS (6.35s) | ✅ PASS (9.48s) | ✅ PASS (16.92s) | 🏆 ✅ PASS (0.81s) |
+| **Máy C (4× 5060Ti) + DFlash2 OFF**| **40.46 tok/s** | ✅ PASS (1.95s) | ✅ PASS (3.82s) | ✅ PASS (5.92s) | ✅ PASS (8.84s) | ✅ PASS (15.42s) | ✅ PASS (1.08s) |
 | **Máy B (2× 5060Ti) + DFlash2 ON** | **74.96 tok/s** | ✅ PASS | ❌ FAIL (40.9K) | ❌ FAIL | ❌ FAIL | ❌ FAIL | ✅ PASS (0.85s) |
 | **Máy A (2× 5060Ti - vLLM)** | **35.00 tok/s** | ✅ PASS | ✅ PASS | ⚠️ Drop Socket | ❌ FAIL | ❌ FAIL | ⚠️ JSON format |
