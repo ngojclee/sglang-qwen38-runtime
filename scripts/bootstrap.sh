@@ -75,7 +75,11 @@ if [ -f "$DFLASH_MODEL_PATH/config.json" ]; then
     sed -i 's/"DFlash2DraftModel"/"DFlashDraftModel"/g' "$DFLASH_MODEL_PATH/config.json"
 fi
 
-# 5. Build / Patch SGLang Engine for Qwen3.8 Hybrid Architecture + DFlash2
+# 5. Clean up duplicate Git LFS cache to save 20GB+ disk space
+echo "🧹 Cleaning duplicate Git LFS cache objects (frees ~21GB disk)..."
+rm -rf "$BASE_MODEL_PATH/.git" "$DFLASH_MODEL_PATH/.git" /tmp/*.tar.gz /root/.cache/pip 2>/dev/null || true
+
+# 6. Build / Patch SGLang Engine for Qwen3.8 Hybrid Architecture + DFlash2
 echo "🔧 Checking and Applying SGLang Qwen3.8 Hybrid Architecture Engine Patches..."
 mkdir -p /sgl-workspace
 
