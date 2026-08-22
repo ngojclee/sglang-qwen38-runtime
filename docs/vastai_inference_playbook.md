@@ -240,7 +240,8 @@
 
 #### 💡 Khuyến Nghị Lựa Chọn Cấu Hình Thực Chiến:
 1. **Dàn 2× RTX 3090 24GB (48GB VRAM - Máy D)**:
-   * **Lựa chọn số 1**: Bật `--kv-cache-dtype fp8_e4m3` + `--speculative-draft-kv-cache-dtype fp8_e4m3` ➔ Vừa đạt **91.5 tok/s** vừa nuốt trọn **262K context trên 40GB VRAM** (cực kỳ sắc bén, bảo toàn 99.8% độ thông minh).
+   * **Mức Tối Ưu Tuyệt Đối (`--mem-fraction-static 0.90` + `8 draft tokens`)**: Cung cấp **`201.446 tokens KV Cache FP8`**, chừa lại ~2.4 GB VRAM đệm cho Triton/Marlin GEMM prefill. Đạt tốc độ **`62 – 91.5 tok/s`**, vượt trọn vẹn **Tier 5 (156K ~ 200K Context)** trong 56 giây!
+   * ⚠️ **Bài học thực nghiệm về mức 0.92 – 0.95**: Khi đẩy lên `0.92` (dù giảm draft tokens từ 8 xuống 6), dung lượng VRAM tự do bị ép xuống chỉ còn **`52.5 MiB`**. Khi nạp khối prefill lớn, kernel Marlin GEMM cần cấp phát `68.0 MiB` cho ma trận kích hoạt (`gptq_marlin_gemm`), dẫn đến lỗi sập tiến trình `torch.OutOfMemoryError: CUDA out of memory`. Do đó, **`0.90` là ranh giới vàng tối thượng** trên 2× 3090.
    * **Nếu cần mở rộng ngữ cảnh khổng lồ (>500K - 1 Triệu tokens)**: Bật `--kv-cache-dtype int4` ➔ Tiết kiệm tối đa bộ nhớ.
 2. **Dàn 4× RTX 5060 Ti 16GB (64GB VRAM - Máy C)**:
    * VRAM 64GB đủ sức chạy trọn vẹn 262K context ở cả **BF16 gốc, FP8 lẫn INT4** mà không cần offload ra RAM.
