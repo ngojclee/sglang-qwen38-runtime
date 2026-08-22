@@ -24,7 +24,7 @@ if os.path.exists(file_path):
     else:
         print("compressed_tensors.py already patched or target not found.")
 
-# 2. Patch qwen3_5.py get_layer prefix & EntryClass
+# 2. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
@@ -73,7 +73,14 @@ if os.path.exists(qwen35_path):
         code2 = re.sub(pattern, new_sub, code2, count=1)
         print("Patched qwen3_5.py get_layer via regex!")
 
-    # B. EntryClass registration
+    # B. Fix num_experts in get_model_config_for_expert_location
+    target_expert = "num_logical_experts=config.num_experts,"
+    replacement_expert = "num_logical_experts=getattr(config, 'num_experts', 0),"
+    if target_expert in code2:
+        code2 = code2.replace(target_expert, replacement_expert)
+        print("Patched qwen3_5.py num_experts fallback successfully!")
+
+    # C. EntryClass registration
     if "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]" in code2:
         code2 = code2.replace(
             "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]",
