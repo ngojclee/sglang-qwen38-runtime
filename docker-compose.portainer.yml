@@ -20,10 +20,10 @@ services:
       - -c
       - |
         apk add --no-cache openssh-client
-        # Machine D (Live hiện tại) -> forward ra cổng 18001
-        (while true; do ssh -N -L 0.0.0.0:18001:127.0.0.1:18000 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887; sleep 5; done) &
+        # Machine D (Live hiện tại) -> forward ra cổng 18001 (-g cho phép container khác kết nối)
+        (while true; do ssh -N -g -L 0.0.0.0:18001:127.0.0.1:18000 -o GatewayPorts=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887; sleep 5; done) &
         # Machine C (Khi nào bật sẽ tự connect) -> forward ra cổng 18002
-        (while true; do ssh -N -L 0.0.0.0:18002:127.0.0.1:18000 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh5.vast.ai -p 15185; sleep 10; done) &
+        (while true; do ssh -N -g -L 0.0.0.0:18002:127.0.0.1:18000 -o GatewayPorts=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh5.vast.ai -p 15185; sleep 10; done) &
         wait
     logging:
       driver: json-file
@@ -47,6 +47,8 @@ services:
       - |
         cat << 'EOF' > /tmp/haproxy.cfg
         global
+            chroot /
+            user root
             log stdout format raw local0
             maxconn 4096
 
@@ -66,7 +68,8 @@ services:
         backend sglang_pool
             mode http
             balance roundrobin
-            option httpchk GET /v1/models
+            option httpchk
+            http-check send meth GET uri /v1/models ver HTTP/1.1 hdr Host localhost
             http-check expect status 200
             default-server check inter 3s fall 2 rise 1
             server machine_d vast-tunnel:18001 check
