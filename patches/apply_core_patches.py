@@ -31,10 +31,12 @@ if os.path.exists(qwen35_path):
         code2 = f.read()
 
     # A. ALL_DECODER_LAYER_TYPES aliases
-    code2 = code2.replace(
-        'ALL_DECODER_LAYER_TYPES = {\n    "attention": Qwen3_5AttentionDecoderLayer,\n    "linear_attention": Qwen3_5LinearDecoderLayer,\n}',
-        'ALL_DECODER_LAYER_TYPES = {\n    "attention": Qwen3_5AttentionDecoderLayer,\n    "linear_attention": Qwen3_5LinearDecoderLayer,\n    "full_attention": Qwen3_5AttentionDecoderLayer,\n}'
-    )
+    if '"full_attention": Qwen3_5AttentionDecoderLayer,' not in code2:
+        code2 = code2.replace(
+            '"linear_attention": Qwen3_5LinearDecoderLayer,',
+            '"linear_attention": Qwen3_5LinearDecoderLayer,\n    "full_attention": Qwen3_5AttentionDecoderLayer,'
+        )
+        print("Patched qwen3_5.py ALL_DECODER_LAYER_TYPES full_attention successfully!")
 
     # B. get_layer prefix
     pattern = r'def get_layer\(idx: int, prefix: str\):[\s\S]*?return layer_class\('
