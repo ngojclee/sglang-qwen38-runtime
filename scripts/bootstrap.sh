@@ -70,6 +70,11 @@ if [ ! -d "$DFLASH_MODEL_PATH" ]; then
     git clone https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2 "$DFLASH_MODEL_PATH" || true
 fi
 
+# Normalize DFlash architecture name for SGLang loader
+if [ -f "$DFLASH_MODEL_PATH/config.json" ]; then
+    sed -i 's/"DFlash2DraftModel"/"DFlashDraftModel"/g' "$DFLASH_MODEL_PATH/config.json"
+fi
+
 # 5. Build / Patch SGLang Engine for Qwen3.8 Hybrid Architecture + DFlash2
 echo "🔧 Checking and Applying SGLang Qwen3.8 Hybrid Architecture Engine Patches..."
 mkdir -p /sgl-workspace
