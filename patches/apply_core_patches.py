@@ -30,50 +30,30 @@ if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
         code2 = f.read()
 
-    # A. get_layer prefix
-    target2 = """        # Decoder layers
-        def get_layer(idx: int, prefix: str):
-            layer_type = config.layers_block_type[idx]
-            layer_class = ALL_DECODER_LAYER_TYPES[layer_type]
-            if layer_type == "attention":
-                prefix = add_prefix("self_attn", prefix)
-            else:
-                prefix = add_prefix("linear_attn", prefix)"""
+    # A. ALL_DECODER_LAYER_TYPES aliases
+    code2 = code2.replace(
+        'ALL_DECODER_LAYER_TYPES = {\n    "attention": Qwen3_5AttentionDecoderLayer,\n    "linear_attention": Qwen3_5LinearDecoderLayer,\n}',
+        'ALL_DECODER_LAYER_TYPES = {\n    "attention": Qwen3_5AttentionDecoderLayer,\n    "linear_attention": Qwen3_5LinearDecoderLayer,\n    "full_attention": Qwen3_5AttentionDecoderLayer,\n}'
+    )
 
-    replacement2 = """        # Decoder layers
-        def get_layer(idx: int, prefix: str):
+    # B. get_layer prefix
+    pattern = r'def get_layer\(idx: int, prefix: str\):[\s\S]*?return layer_class\('
+    new_sub = """def get_layer(idx: int, prefix: str):
             layer_types_list = getattr(config, "layers_block_type", None) or getattr(config, "layer_types", None)
             if layer_types_list is not None:
                 layer_type = layer_types_list[idx]
             else:
-                layer_type = "full_attention" if (idx + 1) % config.full_attention_interval == 0 else "linear_attention"
-            layer_class = ALL_DECODER_LAYER_TYPES[layer_type]
-            if layer_type in ("attention", "full_attention"):
-                prefix = add_prefix("self_attn", prefix)
-            else:
-                prefix = add_prefix("linear_attn", prefix)"""
-
-    if target2 in code2:
-        code2 = code2.replace(target2, replacement2, 1)
-        print("Patched qwen3_5.py get_layer successfully!")
-    else:
-        pattern = r'def get_layer\(idx: int, prefix: str\):[\s\S]*?return layer_class\('
-        new_sub = """def get_layer(idx: int, prefix: str):
-            layer_types_list = getattr(config, "layers_block_type", None) or getattr(config, "layer_types", None)
-            if layer_types_list is not None:
-                layer_type = layer_types_list[idx]
-            else:
-                layer_type = "full_attention" if (idx + 1) % config.full_attention_interval == 0 else "linear_attention"
+                layer_type = "attention" if (idx + 1) % config.full_attention_interval == 0 else "linear_attention"
             layer_class = ALL_DECODER_LAYER_TYPES[layer_type]
             if layer_type in ("attention", "full_attention"):
                 prefix = add_prefix("self_attn", prefix)
             else:
                 prefix = add_prefix("linear_attn", prefix)
             return layer_class("""
-        code2 = re.sub(pattern, new_sub, code2, count=1)
-        print("Patched qwen3_5.py get_layer via regex!")
+    code2 = re.sub(pattern, new_sub, code2, count=1)
+    print("Patched qwen3_5.py get_layer via regex!")
 
-    # B. Fix get_model_config_for_expert_location for dense models
+    # C. Fix get_model_config_for_expert_location for dense models
     pattern_expert = r'@classmethod\s+def get_model_config_for_expert_location\(cls, config\):[\s\S]*?return ModelConfigForExpertLocation\([\s\S]*?\)'
     sub_expert = """@classmethod
     def get_model_config_for_expert_location(cls, config):
@@ -87,7 +67,7 @@ if os.path.exists(qwen35_path):
     code2 = re.sub(pattern_expert, sub_expert, code2, count=1)
     print("Patched qwen3_5.py expert location for dense models successfully!")
 
-    # C. EntryClass registration
+    # D. EntryClass registration
     if "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]" in code2:
         code2 = code2.replace(
             "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]",
