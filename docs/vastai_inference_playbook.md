@@ -241,7 +241,9 @@
 #### 💡 Khuyến Nghị Lựa Chọn Cấu Hình Thực Chiến:
 1. **Dàn 2× RTX 3090 24GB (48GB VRAM - Máy D)**:
    * **Mức Tối Ưu Tuyệt Đối (`--mem-fraction-static 0.90` + `8 draft tokens`)**: Cung cấp **`201.446 tokens KV Cache FP8`**, chừa lại ~2.4 GB VRAM đệm cho Triton/Marlin GEMM prefill. Đạt tốc độ **`62 – 91.5 tok/s`**, vượt trọn vẹn **Tier 5 (156K ~ 200K Context)** trong 56 giây!
-   * ⚠️ **Bài học thực nghiệm về mức 0.92 – 0.95**: Khi đẩy lên `0.92` (dù giảm draft tokens từ 8 xuống 6), dung lượng VRAM tự do bị ép xuống chỉ còn **`52.5 MiB`**. Khi nạp khối prefill lớn, kernel Marlin GEMM cần cấp phát `68.0 MiB` cho ma trận kích hoạt (`gptq_marlin_gemm`), dẫn đến lỗi sập tiến trình `torch.OutOfMemoryError: CUDA out of memory`. Do đó, **`0.90` là ranh giới vàng tối thượng** trên 2× 3090.
+   * ⚠️ **Bài học thực nghiệm về mức 0.92**: Dung lượng VRAM tự do bị ép xuống chỉ còn **`52.5 MiB`**. Khi nạp khối prefill lớn, kernel Marlin GEMM cần cấp phát `68.0 MiB` cho ma trận kích hoạt (`gptq_marlin_gemm`), dẫn đến lỗi sập tiến trình `torch.OutOfMemoryError: CUDA out of memory`.
+   * ❌ **Bài học thực nghiệm về mức 0.95**: VRAM tự do chỉ còn vỏn vẹn **`10.50 MiB`**. Server **không thể khởi động** vì hàm `capture_decode_graph` cần tối thiểu `20.00 MiB` để chụp CUDA Graph (`Exception: Capture cuda graph failed: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 1 has 10.50 MiB free`).
+   * 🏆 **Kết luận khoa học**: **`0.90` là ranh giới vàng tối thượng** trên 2× 3090.
    * **Nếu cần mở rộng ngữ cảnh khổng lồ (>500K - 1 Triệu tokens)**: Bật `--kv-cache-dtype int4` ➔ Tiết kiệm tối đa bộ nhớ.
 2. **Dàn 4× RTX 5060 Ti 16GB (64GB VRAM - Máy C)**:
    * VRAM 64GB đủ sức chạy trọn vẹn 262K context ở cả **BF16 gốc, FP8 lẫn INT4** mà không cần offload ra RAM.
