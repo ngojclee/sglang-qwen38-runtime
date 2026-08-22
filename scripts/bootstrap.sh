@@ -86,9 +86,9 @@ if [ -f "${RUNTIME_ROOT}/patches/apply_core_patches.py" ]; then
     python3 "${RUNTIME_ROOT}/patches/apply_core_patches.py" || true
 fi
 
-if [ -f "${RUNTIME_ROOT}/patches/sglang_qwen38_source_files.tar.gz" ]; then
-    echo "📦 Extracting verified Qwen3.8 model executor files..."
-    tar -xzf "${RUNTIME_ROOT}/patches/sglang_qwen38_source_files.tar.gz" -C /sgl-workspace/sglang/python/sglang/srt/models/ 2>/dev/null || true
+if [ -f "${RUNTIME_ROOT}/patches/sglang_working_tree.tar.gz" ]; then
+    echo "📦 Extracting verified complete Qwen3.8 hybrid architecture working tree..."
+    tar -xzf "${RUNTIME_ROOT}/patches/sglang_working_tree.tar.gz" -C /sgl-workspace/sglang/ 2>/dev/null || true
 fi
 
 # Reinstall SGLang in editable mode
