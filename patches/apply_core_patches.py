@@ -27,10 +27,43 @@ try:
                 full = set(self.full_attention_layer_ids)
                 return [i for i in range(self.num_hidden_layers) if i not in full]
             cls.linear_attention_layer_ids = _linear_attention_layer_ids
+
+        if not hasattr(cls, "mamba2_cache_params"):
+            @property
+            def _mamba2_cache_params(self):
+                from sglang.srt.configs.mamba2 import Mamba2CacheParams, Mamba2StateShape, mamba2_state_dtype
+                from sglang.srt.distributed.parallel_state import get_parallel
+
+                linear_key_head_dim = getattr(self, "linear_key_head_dim", 128)
+                linear_num_key_heads = getattr(self, "linear_num_key_heads", 16)
+                linear_value_head_dim = getattr(self, "linear_value_head_dim", 128)
+                linear_num_value_heads = getattr(self, "linear_num_value_heads", 16)
+                linear_conv_kernel_dim = getattr(self, "linear_conv_kernel_dim", 4)
+
+                key_dim = linear_key_head_dim * linear_num_key_heads
+                value_dim = linear_value_head_dim * linear_num_value_heads
+                shape = Mamba2StateShape.create(
+                    tp_world_size=get_parallel().attn_tp_size,
+                    intermediate_size=value_dim,
+                    n_groups=linear_num_key_heads,
+                    num_heads=linear_num_value_heads,
+                    head_dim=linear_value_head_dim,
+                    state_size=linear_key_head_dim,
+                    conv_kernel=linear_conv_kernel_dim,
+                    conv_shard_groups=[key_dim, key_dim, value_dim],
+                )
+                return Mamba2CacheParams(
+                    shape=shape, layers=self.linear_attention_layer_ids, dtype=mamba2_state_dtype(self)
+                )
+            cls.mamba2_cache_params = _mamba2_cache_params
 except Exception as e:
     pass
 """
-    if "_full_attention_layer_ids" not in code_h:
+    # Replace existing helpers_patch
+    if "def _mamba2_cache_params" not in code_h:
+        # strip old helpers if present
+        if "try:\n    from transformers.models.qwen3_5.configuration_qwen3_5" in code_h:
+            code_h = code_h.split("try:\n    from transformers.models.qwen3_5.configuration_qwen3_5")[0]
         code_h = code_h + "\n" + helpers_patch
 
     pattern_h = r'def hybrid_gdn_config\(model_config: ModelConfig\):[\s\S]*?config = model_config\.hf_config\.get_text_config\(\)[\s\S]*?if isinstance\('
@@ -43,30 +76,13 @@ except Exception as e:
 
     with open(hybrid_arch_path, "w", encoding="utf-8") as f:
         f.write(code_h)
-    print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & registration)")
+    print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & mamba2_cache_params)")
 
-# 2. Patch kv_cache_configurator.py (_handle_max_mamba_cache guard + resolve_max_num_reqs None guard)
+# 2. Patch kv_cache_configurator.py
 kv_config_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py"
 if os.path.exists(kv_config_path):
     with open(kv_config_path, "r", encoding="utf-8") as f:
         code_k = f.read()
-
-    # Restore self.mambaish_config = mambaish_config(self.model_config)
-    code_k = code_k.replace(
-        "self.mambaish_config = mamba2_config(self.model_config)",
-        "self.mambaish_config = mambaish_config(self.model_config)"
-    )
-
-    pattern_k = r'def _handle_max_mamba_cache\(self, total_rest_memory\):[\s\S]*?assert config is not None'
-    repl_k = """def _handle_max_mamba_cache(self, total_rest_memory):
-        config = self.mambaish_config
-        server_args = self.server_args
-        assert config is not None
-        if not hasattr(config, "mamba2_cache_params") or config.mamba2_cache_params is None:
-            return total_rest_memory"""
-
-    if "if not hasattr(config, \"mamba2_cache_params\")" not in code_k:
-        code_k = re.sub(pattern_k, repl_k, code_k, count=1)
 
     # Guard self.server_args.max_mamba_cache_size // ratio
     target_division = "max_num_reqs, self.server_args.max_mamba_cache_size // ratio"
@@ -76,7 +92,7 @@ if os.path.exists(kv_config_path):
 
     with open(kv_config_path, "w", encoding="utf-8") as f:
         f.write(code_k)
-    print("✅ Patched kv_cache_configurator.py (Mamba None guards)")
+    print("✅ Patched kv_cache_configurator.py")
 
 # 3. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
 model_config_path = "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py"
