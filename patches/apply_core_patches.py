@@ -8,16 +8,13 @@ if os.path.exists(hybrid_arch_path):
     with open(hybrid_arch_path, "r", encoding="utf-8") as f:
         code_h = f.read()
 
-    target_h = """def hybrid_gdn_config(model_config: ModelConfig):
-    config = model_config.hf_config.get_text_config()
-    if isinstance("""
-    
+    pattern_h = r'def hybrid_gdn_config\(model_config: ModelConfig\):[\s\S]*?config = model_config\.hf_config\.get_text_config\(\)[\s\S]*?if isinstance\('
     repl_h = """def hybrid_gdn_config(model_config: ModelConfig):
     config = model_config.hf_config.get_text_config()
     if getattr(config, "model_type", "") in ("qwen3_5", "qwen3_5_text", "qwen3_next", "qwen3") or isinstance("""
-
-    if target_h in code_h and "getattr(config, \"model_type\", \"\")" not in code_h:
-        code_h = code_h.replace(target_h, repl_h, 1)
+    
+    if "getattr(config, \"model_type\", \"\")" not in code_h:
+        code_h = re.sub(pattern_h, repl_h, code_h, count=1)
         with open(hybrid_arch_path, "w", encoding="utf-8") as f:
             f.write(code_h)
         print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig support)")
@@ -28,20 +25,16 @@ if os.path.exists(kv_config_path):
     with open(kv_config_path, "r", encoding="utf-8") as f:
         code_k = f.read()
 
-    target_k = """    def _handle_max_mamba_cache(self, total_rest_memory):
-        config = self.mambaish_config
-        server_args = self.server_args
-        assert config is not None"""
-
-    repl_k = """    def _handle_max_mamba_cache(self, total_rest_memory):
+    pattern_k = r'def _handle_max_mamba_cache\(self, total_rest_memory\):[\s\S]*?assert config is not None'
+    repl_k = """def _handle_max_mamba_cache(self, total_rest_memory):
         config = self.mambaish_config
         server_args = self.server_args
         assert config is not None
         if not hasattr(config, "mamba2_cache_params") or config.mamba2_cache_params is None:
             return total_rest_memory"""
 
-    if target_k in code_k and "if not hasattr(config, \"mamba2_cache_params\")" not in code_k:
-        code_k = code_k.replace(target_k, repl_k, 1)
+    if "if not hasattr(config, \"mamba2_cache_params\")" not in code_k:
+        code_k = re.sub(pattern_k, repl_k, code_k, count=1)
         with open(kv_config_path, "w", encoding="utf-8") as f:
             f.write(code_k)
         print("✅ Patched kv_cache_configurator.py (Mamba2 params guard)")
