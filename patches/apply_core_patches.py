@@ -68,7 +68,28 @@ if os.path.exists(model_config_path):
             f.write(code_mc)
         print("✅ Patched model_config.py (get_hybrid_layer_ids for Qwen 3.5/3.8)")
 
-# 3. Patch compressed_tensors.py
+# 3. Patch layer_setup.py (num_effective_layers for hybrid models)
+layer_setup_path = "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner_components/layer_setup.py"
+if os.path.exists(layer_setup_path):
+    with open(layer_setup_path, "r", encoding="utf-8") as f:
+        code_ls = f.read()
+
+    target_ls = "    num_effective_layers = pp_range.end_layer - pp_range.start_layer"
+    repl_ls = """    num_effective_layers = pp_range.end_layer - pp_range.start_layer
+    if getattr(model_config, "full_attention_layer_ids", None) is not None:
+        full_attn_ids = [
+            idx for idx in range(pp_range.start_layer, pp_range.end_layer)
+            if idx in model_config.full_attention_layer_ids
+        ]
+        num_effective_layers = len(full_attn_ids)"""
+
+    if target_ls in code_ls and "full_attn_ids =" not in code_ls:
+        code_ls = code_ls.replace(target_ls, repl_ls, 1)
+        with open(layer_setup_path, "w", encoding="utf-8") as f:
+            f.write(code_ls)
+        print("✅ Patched layer_setup.py (num_effective_layers for hybrid models)")
+
+# 4. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
 if os.path.exists(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -90,7 +111,7 @@ if os.path.exists(file_path):
             f.write(code)
         print("✅ Patched compressed_tensors.py")
 
-# 4. Patch qwen3_5.py
+# 5. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
@@ -143,7 +164,7 @@ if os.path.exists(qwen35_path):
         f.write(code2)
     print("✅ Patched qwen3_5.py")
 
-# 5. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
+# 6. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
 wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 if os.path.exists(wNa16_path):
     with open(wNa16_path, "r", encoding="utf-8") as f:
@@ -258,7 +279,7 @@ if os.path.exists(wNa16_path):
         f.write(code3)
     print("✅ Patched compressed_tensors_wNa16.py")
 
-# 6. Patch dflash.py (DFlash2DraftModel class registration)
+# 7. Patch dflash.py (DFlash2DraftModel class registration)
 dflash_path = "/sgl-workspace/sglang/python/sglang/srt/models/dflash.py"
 if os.path.exists(dflash_path):
     with open(dflash_path, "r", encoding="utf-8") as f:
