@@ -142,11 +142,17 @@ for i in {1..60}; do
     echo "   ...booting ($((i*3))s)"
 done
 
+# 10. Extract Vast instance info for cluster registry
+VAST_CONTAINER_ID=$(cat /root/.vast_containerlabel 2>/dev/null | tr -d 'C.' || echo "")
+
 if [ "$READY" -eq 1 ]; then
     echo "================================================================="
     echo "✅ FAST PROVISIONING & BUILD COMPLETED SUCCESSFULLY!"
     echo "Endpoint: http://127.0.0.1:18000/v1"
     echo "Served Model: Qwen3.8-27B-Uncensored"
+    if [ -n "$VAST_CONTAINER_ID" ]; then
+        echo "Vast Instance ID: $VAST_CONTAINER_ID"
+    fi
     echo "================================================================="
 else
     echo "❌ Timeout waiting for SGLang. Check logs at /var/log/portal/sglang.log"
