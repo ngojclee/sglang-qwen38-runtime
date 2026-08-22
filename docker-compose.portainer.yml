@@ -288,10 +288,13 @@ services:
                                     print(f"Error stopping instance: {e}", flush=True)
                         current_active_node = None
 
-                    # B. Chưa quá timeout: Quét trực tiếp trên Vast API và TẮT ngay các máy không phải Leader
+                    # B. Chưa quá timeout: Quét trực tiếp trên Vast API và TẮT ngay các máy thừa trong CHÙM NÀY (không đụng máy khác của user)
                     else:
                         primary_leader = current_active_node or (nodes[0] if nodes else None)
                         leader_id = str(primary_leader.get("instance_id")) if primary_leader else None
+                        
+                        # Chỉ quản lý các instance ID nằm trong cấu hình cụm này!
+                        cluster_instance_ids = {str(n.get("instance_id")) for n in nodes if n.get("instance_id")}
                         
                         url = f"https://console.vast.ai/api/v1/instances/?api_key={VAST_API_KEY}"
                         try:
@@ -304,9 +307,9 @@ services:
                                         inst_id = str(inst.get("id"))
                                         actual_status = inst.get("actual_status") or inst.get("intended_status")
                                         
-                                        # Nếu máy đang chạy trên Vast nhưng KHÔNG phải là Primary Leader -> Gửi lệnh STOP ngay
-                                        if actual_status == "running" and leader_id and inst_id != leader_id:
-                                            print(f"💰 Auto-stopping redundant machine {inst_id} on Vast.ai (keeping single active leader {leader_id})...", flush=True)
+                                        # Chỉ can thiệp nếu instance ID này thuộc chùm của ta VÀ đang chạy VÀ không phải Leader
+                                        if inst_id in cluster_instance_ids and actual_status == "running" and leader_id and inst_id != leader_id:
+                                            print(f"💰 Auto-stopping redundant cluster machine {inst_id} on Vast.ai (keeping active leader {leader_id})...", flush=True)
                                             await set_instance_state(inst_id, "stopped")
                         except Exception as e:
                             print(f"⚠️ Error checking redundant instances on Vast: {e}", flush=True)
@@ -350,12 +353,19 @@ services:
                     upstream_resp = await client.send(req_stream, stream=True)
 
                     async def sse_generator():
-                        tool_mode = False
-                        has_emitted_meaningful_text = False
+                        pending_whitespace_chunks = []
                         try:
                             async for line in upstream_resp.aiter_lines():
                                 if not line: continue
-                                if line.startswith("data: ") and line != "data: [DONE]":
+                                if line == "data: [DONE]":
+                                    # Xả nốt whitespace cuối luồng nếu có
+                                    for pending in pending_whitespace_chunks:
+                                        yield (f"data: {json.dumps(pending, ensure_ascii=False)}\n\n").encode("utf-8")
+                                    pending_whitespace_chunks.clear()
+                                    yield b"data: [DONE]\n\n"
+                                    continue
+                                    
+                                if line.startswith("data: "):
                                     try:
                                         data = json.loads(line[6:])
                                         choices = data.get("choices", [])
@@ -363,26 +373,40 @@ services:
                                             delta = choices[0].get("delta", {})
                                             content = delta.get("content")
                                             tool_calls = delta.get("tool_calls")
+                                            finish_reason = choices[0].get("finish_reason")
                                             
-                                            # State machine tracking
-                                            if tool_calls:
-                                                tool_mode = True
+                                            # A. Nếu chunk có Tool Call hoặc kết thúc bằng tool_calls:
+                                            # HỦY BỎ toàn bộ whitespace đệm phía trước! (Triệt tiêu \n\n edge-case)
+                                            if tool_calls or finish_reason == "tool_calls":
+                                                pending_whitespace_chunks.clear()
+                                                if isinstance(content, str) and content.strip() == "":
+                                                    del delta["content"]
+                                                yield (f"data: {json.dumps(data, ensure_ascii=False)}\n\n").encode("utf-8")
+                                                continue
                                             
-                                            # Issue #29441 & #24293: State-Aware Whitespace Filter
+                                            # B. Nếu chunk là whitespace đơn thuần:
+                                            # ĐƯA VÀO BUFFER để chờ xem chunk tiếp theo là text hay tool call!
                                             if isinstance(content, str) and content.strip() == "":
-                                                if tool_mode or not has_emitted_meaningful_text:
-                                                    if tool_calls:
-                                                        del delta["content"]
-                                                    else:
-                                                        if not delta.get("role"):
-                                                            continue # Drop naked whitespace chunk before/during tool calls
-                                                        else:
-                                                            del delta["content"]
-                                            elif isinstance(content, str) and content.strip() != "":
-                                                has_emitted_meaningful_text = True
-                                                tool_mode = False
+                                                if not delta.get("role") and not delta.get("reasoning_content"):
+                                                    pending_whitespace_chunks.append(data)
+                                                    continue # Tạm giữ lại, chưa phát ra
+                                                else:
+                                                    del delta["content"]
+                                                    yield (f"data: {json.dumps(data, ensure_ascii=False)}\n\n").encode("utf-8")
+                                                    continue
+                                            
+                                            # C. Nếu chunk là văn bản có nghĩa (Text):
+                                            # XẢ HẾT whitespace đệm trước đó rồi mới phát chunk này -> Bảo toàn 100% thụt lề code
+                                            if isinstance(content, str) and content.strip() != "":
+                                                for pending in pending_whitespace_chunks:
+                                                    yield (f"data: {json.dumps(pending, ensure_ascii=False)}\n\n").encode("utf-8")
+                                                pending_whitespace_chunks.clear()
+                                                yield (f"data: {json.dumps(data, ensure_ascii=False)}\n\n").encode("utf-8")
+                                                continue
                                                 
-                                            line = "data: " + json.dumps(data, ensure_ascii=False)
+                                            # D. Các chunk khác (như reasoning_content)
+                                            yield (f"data: {json.dumps(data, ensure_ascii=False)}\n\n").encode("utf-8")
+                                            continue
                                     except:
                                         pass
                                 yield (line + "\n\n").encode("utf-8")
