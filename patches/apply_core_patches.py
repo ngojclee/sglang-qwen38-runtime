@@ -19,25 +19,28 @@ if os.path.exists(hybrid_arch_path):
             f.write(code_h)
         print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig support)")
 
-# 2. Patch kv_cache_configurator.py (_handle_max_mamba_cache guard for non-Mamba2 models)
+# 2. Patch kv_cache_configurator.py (Use mamba2_config for mamba2_cache_params)
 kv_config_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py"
 if os.path.exists(kv_config_path):
     with open(kv_config_path, "r", encoding="utf-8") as f:
         code_k = f.read()
 
-    pattern_k = r'def _handle_max_mamba_cache\(self, total_rest_memory\):[\s\S]*?assert config is not None'
-    repl_k = """def _handle_max_mamba_cache(self, total_rest_memory):
-        config = self.mambaish_config
-        server_args = self.server_args
-        assert config is not None
-        if not hasattr(config, "mamba2_cache_params") or config.mamba2_cache_params is None:
-            return total_rest_memory"""
+    # Import mamba2_config
+    if "from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, mambaish_config, mamba2_config" not in code_k:
+        code_k = code_k.replace(
+            "from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, mambaish_config",
+            "from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, mambaish_config, mamba2_config"
+        )
 
-    if "if not hasattr(config, \"mamba2_cache_params\")" not in code_k:
-        code_k = re.sub(pattern_k, repl_k, code_k, count=1)
+    # Change self.mambaish_config = mamba2_config(self.model_config)
+    if "self.mambaish_config = mamba2_config(self.model_config)" not in code_k:
+        code_k = code_k.replace(
+            "self.mambaish_config = mambaish_config(self.model_config)",
+            "self.mambaish_config = mamba2_config(self.model_config)"
+        )
         with open(kv_config_path, "w", encoding="utf-8") as f:
             f.write(code_k)
-        print("✅ Patched kv_cache_configurator.py (Mamba2 params guard)")
+        print("✅ Patched kv_cache_configurator.py (mamba2_config separation)")
 
 # 3. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
