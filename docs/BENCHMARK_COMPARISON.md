@@ -39,7 +39,27 @@
 
 ---
 
-## 🔍 III. PHÂN TÍCH KỸ THUẬT CỐT LÕI TẠO NÊN KẾT QUẢ NÀY
+## 🧮 III. BẢNG BÓC TÁCH CHI PHÍ VRAM ĐỂ CHẠY 262K CONTEXT + DFLASH2 (INT4 vs FP8 vs BF16)
+
+> **Mô hình mục tiêu:** `Qwen3.8-27B (Hybrid GDN 64 layers)` + `DFlash2 Speculative Engine`.  
+> **Câu hỏi kỹ thuật:** *Cần bao nhiêu VRAM để vừa bật DFlash2 (91.5 tok/s), vừa giữ trọn vẹn 262.144 tokens ngay trên VRAM không bị tràn OOM?*
+
+| Thành phần Tiêu thụ VRAM | Chuẩn **INT4 KV Cache** (`--kv-cache-dtype int4`) | Chuẩn **FP8 KV Cache** (`--kv-cache-dtype fp8_e4m3`) | Chuẩn **BF16 KV Cache** (Mặc định không nén) |
+| :--- | :---: | :---: | :---: |
+| **1. Trọng số Base Model (INT4 AWQ)** | **12.27 GB** | **12.27 GB** | **12.27 GB** |
+| **2. Trọng số Draft Model DFlash2** | **3.60 GB** *(bfloat16)* | **3.60 GB** *(bfloat16)* | **3.60 GB** *(bfloat16)* |
+| **3. Mamba / GDN State Cache (48 layers)** | **7.74 GB** | **7.74 GB** | **7.74 GB** |
+| **4. CUDA Graph Static Buffers & Runtime** | **1.50 GB** | **1.50 GB** | **1.50 GB** |
+| **5. KV Cache cho 262.144 Tokens (262K)** | 🟢 **4.50 GB** *(16 KB/tok + Draft)* | 🟢 **9.00 GB** *(32 KB/tok + Draft)* | 🟡 **18.00 GB** *(64 KB/tok + Draft)* |
+| **6. VRAM đệm an toàn chống OOM (Headroom)** | **3.50 GB** | **5.00 GB** | **6.50 GB** |
+| 🎯 **TỔNG VRAM YÊU CẦU TỐI THIỂU** | 👑 **`~33.11 GB` (~34 GB VRAM)** | 🟢 **`~39.11 GB` (~40 GB VRAM)** | 🟡 **`~49.61 GB` (~52 GB VRAM)** |
+| **Khả năng đáp ứng trên 2× RTX 3090 (48GB)** | 🏆 **DƯ 14 GB VRAM** *(Mở rộng >500K)* | 🏆 **DƯ 8 GB VRAM (Lý tưởng nhất)** | ❌ **Thiếu ~4 GB VRAM** *(Kịch trần 75.4K)* |
+| **Khả năng đáp ứng trên 4× RTX 5060Ti (64GB)**| 🏆 **DƯ 30 GB VRAM** | 🏆 **DƯ 24 GB VRAM** | 🏆 **DƯ 14 GB VRAM (Đủ 100%)** |
+| **Độ chính xác ngữ nghĩa (Precision)** | ~99.0% | ~99.8% *(Chuẩn vàng)* | 100% *(Gốc)* |
+
+---
+
+## 🔍 IV. PHÂN TÍCH KỸ THUẬT CỐT LÕI TẠO NÊN KẾT QUẢ NÀY
 
 ### 1. Tại sao DFLASH2 đạt được 91.53 tok/s trên 2× RTX 3090?
 - **Khối đoán trước (Block size = 8)**: Mô hình draft `Qwen3.8-27B-DFlash2` (5 layer, 3.6GB) dự đoán song song 8 token liên tiếp mỗi lượt.
