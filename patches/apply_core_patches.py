@@ -105,12 +105,17 @@ if os.path.exists(mem_pool_path):
 
     def move_kv_cache("""
 
-    if "def move_kv_cache(" in code_mp and "def set_kv_buffer_prefix_valid(" not in code_mp.split("class HybridLinearKVPool")[1]:
-        code_mp = code_mp.replace("    def move_kv_cache(", prefix_valid_method, 1)
+    if "class HybridLinearKVPool(KVCache):" in code_mp:
+        parts = code_mp.split("class HybridLinearKVPool(KVCache):")
+        before_hl = parts[0]
+        hl_body = parts[1]
+        if "def set_kv_buffer_prefix_valid(" not in hl_body and "def move_kv_cache(" in hl_body:
+            hl_body = hl_body.replace("    def move_kv_cache(", prefix_valid_method, 1)
+            code_mp = before_hl + "class HybridLinearKVPool(KVCache):" + hl_body
 
     with open(mem_pool_path, "w", encoding="utf-8") as f:
         f.write(code_mp)
-    print("✅ Patched memory_pool.py (_transfer_full_attention_id + set_kv_buffer_prefix_valid)")
+    print("✅ Patched memory_pool.py (_transfer_full_attention_id + set_kv_buffer_prefix_valid for HybridLinearKVPool)")
 
 # 3. Patch hybrid_linear_attn_backend.py (Support draft/pure attention models without mixed_qkv in all methods)
 hybrid_backend_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py"
