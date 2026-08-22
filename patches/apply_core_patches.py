@@ -188,20 +188,24 @@ if os.path.exists(file_path):
             f.write(code)
         print("✅ Patched compressed_tensors.py")
 
-# 8. Patch qwen3_5.py
+# 8. Patch qwen3_5.py (Full CausalLM with LMHead & LogitsProcessor)
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
         code2 = f.read()
 
-    # A. ALL_DECODER_LAYER_TYPES aliases
+    # A. Imports
+    if "from sglang.srt.layers.logits_processor import LogitsProcessor" not in code2:
+        code2 = "from sglang.srt.layers.logits_processor import LogitsProcessor\nfrom sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead\n" + code2
+
+    # B. ALL_DECODER_LAYER_TYPES aliases
     if '"full_attention": Qwen3_5AttentionDecoderLayer,' not in code2:
         code2 = code2.replace(
             '"linear_attention": Qwen3_5LinearDecoderLayer,',
             '"linear_attention": Qwen3_5LinearDecoderLayer,\n    "full_attention": Qwen3_5AttentionDecoderLayer,'
         )
 
-    # B. get_layer prefix
+    # C. get_layer prefix
     pattern = r'def get_layer\(idx: int, prefix: str\):[\s\S]*?return layer_class\('
     new_sub = """def get_layer(idx: int, prefix: str):
             layer_types_list = getattr(config, "layers_block_type", None) or getattr(config, "layer_types", None)
@@ -217,7 +221,76 @@ if os.path.exists(qwen35_path):
             return layer_class("""
     code2 = re.sub(pattern, new_sub, code2, count=1)
 
-    # C. Fix get_model_config_for_expert_location for dense models
+    # D. Init LM Head and LogitsProcessor in Qwen3_5ForCausalLM
+    target_norm = """        # Final normalization
+        if self.pp_group.is_last_rank:
+            self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+
+        self.layers_to_capture = []"""
+
+    repl_norm = """        # Final normalization
+        if self.pp_group.is_last_rank:
+            self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if self.pp_group.world_size == 1 and getattr(config, "tie_word_embeddings", False):
+                self.lm_head = self.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=add_prefix("lm_head", prefix),
+                )
+        else:
+            self.norm = PPMissingLayer()
+            self.lm_head = PPMissingLayer()
+
+        self.logits_processor = LogitsProcessor(config)
+        self.capture_aux_hidden_states = False
+        self.layers_to_capture = []"""
+
+    if target_norm in code2:
+        code2 = code2.replace(target_norm, repl_norm, 1)
+
+    # E. Update set_dflash_layers_to_capture
+    target_dflash_cap = """    def set_dflash_layers_to_capture(self, layers_to_capture: list[int]):
+        self.layers_to_capture = layers_to_capture
+        for layer_id in self.layers_to_capture:
+            setattr(self.layers[layer_id], "_is_layer_to_capture", True)"""
+
+    repl_dflash_cap = """    def set_dflash_layers_to_capture(self, layers_to_capture: list[int]):
+        self.capture_aux_hidden_states = True
+        self.layers_to_capture = layers_to_capture
+        for layer_id in self.layers_to_capture:
+            setattr(self.layers[layer_id], "_is_layer_to_capture", True)"""
+
+    if target_dflash_cap in code2:
+        code2 = code2.replace(target_dflash_cap, repl_dflash_cap, 1)
+
+    # F. Update Qwen3_5ForCausalLM.forward return to use LogitsProcessor
+    target_forward_end = """        if len(aux_hidden_states) == 0:
+            return hidden_states
+
+        return hidden_states, aux_hidden_states"""
+
+    repl_forward_end = """        aux_states = aux_hidden_states if (getattr(self, "capture_aux_hidden_states", False) and len(aux_hidden_states) > 0) else None
+
+        if not self.pp_group.is_last_rank:
+            return hidden_states
+
+        return self.logits_processor(
+            input_ids,
+            hidden_states,
+            self.lm_head,
+            forward_batch,
+            aux_states,
+        )"""
+
+    if target_forward_end in code2:
+        code2 = code2.replace(target_forward_end, repl_forward_end, 1)
+
+    # G. Fix get_model_config_for_expert_location for dense models
     pattern_expert = r'@classmethod\s+def get_model_config_for_expert_location\(cls, config\):[\s\S]*?return ModelConfigForExpertLocation\([\s\S]*?\)'
     sub_expert = """@classmethod
     def get_model_config_for_expert_location(cls, config):
@@ -230,7 +303,7 @@ if os.path.exists(qwen35_path):
         )"""
     code2 = re.sub(pattern_expert, sub_expert, code2, count=1)
 
-    # D. EntryClass registration
+    # H. EntryClass registration
     if "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]" in code2:
         code2 = code2.replace(
             "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]",
@@ -239,7 +312,7 @@ if os.path.exists(qwen35_path):
         
     with open(qwen35_path, "w", encoding="utf-8") as f:
         f.write(code2)
-    print("✅ Patched qwen3_5.py")
+    print("✅ Patched qwen3_5.py (Full CausalLM with LMHead & LogitsProcessor)")
 
 # 9. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
 wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
