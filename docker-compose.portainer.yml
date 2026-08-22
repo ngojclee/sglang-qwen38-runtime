@@ -232,14 +232,14 @@ services:
                 if healthy_nodes:
                     best_node = healthy_nodes[0] # Máy khỏe có giá rẻ nhất
                     if not current_active_node or current_active_node["target"] != best_node["target"]:
-                        print(f"🎯 Cost-Priority Leader selected: {best_node['target']} (Instance {best_node['instance_id']} - ${best_node['price']}/hr)", flush=True)
+                        print(f"🎯 Cost-Priority Leader selected: {best_node['target']} (Instance {best_node['instance_id']} - USD {best_node['price']}/hr)", flush=True)
                         current_active_node = best_node
                     return current_active_node
 
                 # Tất cả đều tắt -> Khởi động máy có giá rẻ nhất (nodes[0])
                 primary_candidate = nodes[0] if nodes else None
                 if primary_candidate and primary_candidate["instance_id"]:
-                    print(f"🚀 Cold-starting cheapest instance {primary_candidate['instance_id']} (${primary_candidate['price']}/hr)...", flush=True)
+                    print(f"🚀 Cold-starting cheapest instance {primary_candidate['instance_id']} (USD {primary_candidate['price']}/hr)...", flush=True)
                     await set_instance_state(primary_candidate["instance_id"], "running")
                     
                     start_t = time.time()
