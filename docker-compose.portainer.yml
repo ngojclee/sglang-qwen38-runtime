@@ -72,7 +72,7 @@ services:
       - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-30}
     volumes:
       - /home/Docker/CLIProxyAPI/config.yaml:/cpa-config.yaml:rw
-      - /home/Docker/vast-tunnel/instances.txt:/etc/vast/instances.txt:ro
+      - /home/Docker/vast-tunnel/instances.txt:/etc/vast/instances.txt:rw
     entrypoint:
       - /bin/sh
       - -c
@@ -94,7 +94,7 @@ services:
         current_active_node = None
         lock = asyncio.Lock()
 
-        # 1. Đồng bộ config CPA
+        # 1. Tự động đồng bộ CPA config
         def sync_cpa_config():
             conf_path = "/cpa-config.yaml"
             if not os.path.exists(conf_path) or not API_LLM_SERVER:
@@ -115,12 +115,47 @@ services:
 
         sync_cpa_config()
 
-        # 2. Đọc danh sách máy
+        # 2. Tự động quét Vast API để phát hiện mọi máy mới tạo và tự ghi vào instances.txt
+        async def auto_sync_instances_from_vast():
+            if not VAST_API_KEY:
+                return
+            inst_path = "/etc/vast/instances.txt"
+            url = f"https://console.vast.ai/api/v0/instances/?api_key={VAST_API_KEY}"
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        instances = data.get("instances", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                        new_lines = []
+                        for inst in instances:
+                            inst_id = inst.get("id")
+                            ssh_host = inst.get("ssh_host")
+                            ssh_port = inst.get("ssh_port")
+                            if inst_id and ssh_host and ssh_port:
+                                new_lines.append(f"{ssh_host} {ssh_port} {inst_id}")
+                        
+                        if new_lines:
+                            new_content = "\n".join(new_lines) + "\n"
+                            old_content = ""
+                            if os.path.exists(inst_path):
+                                with open(inst_path, "r", encoding="utf-8") as f:
+                                    old_content = f.read()
+                            
+                            if new_content.strip() != old_content.strip():
+                                os.makedirs(os.path.dirname(inst_path), exist_ok=True)
+                                with open(inst_path, "w", encoding="utf-8") as f:
+                                    f.write(new_content)
+                                print(f"🔄 Auto-discovered and updated {len(new_lines)} instances from Vast API into {inst_path}!", flush=True)
+            except Exception as e:
+                print(f"⚠️ Error querying Vast API instances: {e}", flush=True)
+
+        # 3. Đọc danh sách máy từ instances.txt
         def get_cluster_nodes():
             nodes = []
             inst_path = "/etc/vast/instances.txt"
             if os.path.exists(inst_path):
-                with open(inst_path, "r") as f:
+                with open(inst_path, "r", encoding="utf-8") as f:
                     lines = [l.strip() for l in f.readlines() if l.strip() and not l.startswith("#")]
                     for idx, line in enumerate(lines):
                         parts = line.split()
@@ -151,10 +186,11 @@ services:
             except:
                 return False
 
-        # 3. Dynamic Leader Resolution (Chọn máy đang LIVE hoặc Cold-Start)
+        # 4. Dynamic Leader Resolution (Chọn máy đang LIVE hoặc Cold-Start)
         async def resolve_active_node():
             global current_active_node, last_activity
             last_activity = time.time()
+            await auto_sync_instances_from_vast()
             nodes = get_cluster_nodes()
 
             async with lock:
@@ -185,14 +221,20 @@ services:
                 
                 return current_active_node or nodes[0]
 
-        # 4. Quản lý dọn dẹp các máy thừa & tự tắt khi IDLE
+        # 5. Quản lý dọn dẹp các máy thừa & tự tắt khi IDLE
         @app.on_event("startup")
         async def start_auto_scaler():
             async def scaler_loop():
                 global current_active_node
                 while True:
                     await asyncio.sleep(60)
-                    if not VAST_API_KEY or active_requests > 0:
+                    if not VAST_API_KEY:
+                        continue
+                    
+                    # Tự động đồng bộ danh sách máy từ Vast API
+                    await auto_sync_instances_from_vast()
+
+                    if active_requests > 0:
                         continue
                     
                     idle_seconds = time.time() - last_activity
