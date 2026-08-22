@@ -69,14 +69,14 @@ if os.path.exists(kv_config_path):
         code_k = re.sub(pattern_k, repl_k, code_k, count=1)
 
     # Guard self.server_args.max_mamba_cache_size // ratio
-    target_reqs = "if self.mambaish_config is not None:"
-    repl_reqs = "if self.mambaish_config is not None and self.server_args.max_mamba_cache_size is not None:"
-    if target_reqs in code_k and repl_reqs not in code_k:
-        code_k = code_k.replace(target_reqs, repl_reqs, 1)
+    target_division = "max_num_reqs, self.server_args.max_mamba_cache_size // ratio"
+    repl_division = "max_num_reqs, (self.server_args.max_mamba_cache_size // ratio) if self.server_args.max_mamba_cache_size is not None else max_num_reqs"
+    if target_division in code_k:
+        code_k = code_k.replace(target_division, repl_division)
 
     with open(kv_config_path, "w", encoding="utf-8") as f:
         f.write(code_k)
-    print("✅ Patched kv_cache_configurator.py (Mamba guards)")
+    print("✅ Patched kv_cache_configurator.py (Mamba None guards)")
 
 # 3. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
 model_config_path = "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py"
