@@ -92,7 +92,7 @@
 --kv-cache-dtype fp8_e4m3 \
 --max-running-requests 4 \
 --trust-remote-code \
---api-key 440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55 \
+--api-key YOUR_VAST_INSTANCE_TOKEN \
 --cuda-graph-backend-decode tc_piecewise \
 --cuda-graph-backend-prefill tc_piecewise \
 --attention-backend triton \
@@ -148,7 +148,7 @@
 --kv-cache-dtype fp8_e4m3 \
 --max-running-requests 4 \
 --trust-remote-code \
---api-key 440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55 \
+--api-key YOUR_VAST_INSTANCE_TOKEN \
 --cuda-graph-backend-decode tc_piecewise \
 --cuda-graph-backend-prefill tc_piecewise \
 --attention-backend triton \
@@ -176,7 +176,7 @@
 --kv-cache-dtype fp8_e4m3 \
 --max-running-requests 4 \
 --trust-remote-code \
---api-key 440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55 \
+--api-key YOUR_VAST_INSTANCE_TOKEN \
 --cuda-graph-backend-decode tc_piecewise \
 --cuda-graph-backend-prefill tc_piecewise \
 --attention-backend triton \
@@ -399,7 +399,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --enable-auto-tool-choice \
     --tool-call-parser hermes \
     --served-model-name Qwen3.8-27B-Uncensored-Aggressive-W4A16-AWQ \
-    --api-key 440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55 \
+    --api-key YOUR_VAST_INSTANCE_TOKEN \
     --port 18000 \
     --host 0.0.0.0
 ```
@@ -417,7 +417,7 @@ python3 -m vllm.entrypoints.openai.api_server \
   * **Địa chỉ Proxy Vast.ai:** `ssh5.vast.ai:15185`
   * **Địa chỉ IP Public Trực tiếp:** `113.177.120.190:13007` *(Port 13007 ➔ 22/tcp)*
   * **User & SSH Key:** `root` *(SSH Key đặt tại `/home/Docker/vast-tunnel/ssh/id_ed25519` trên CT 101 - **Không cần tạo lại**)*
-* **SGLang Engine API Key:** `440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55`
+* **SGLang Engine API Key:** `YOUR_VAST_INSTANCE_TOKEN`
 * **SSH Tunnel Port Forward:** `18000:127.0.0.1:18000`
 
 ---
@@ -518,7 +518,7 @@ providers:
     name: "Vast AI SGLang"
     type: openai
     base_url: "http://vast-tunnel:18000/v1"   # Trỏ trực tiếp qua container vast-tunnel trong mạng vast-net
-    api_key: "440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55"
+    api_key: "YOUR_VAST_INSTANCE_TOKEN"
     models:
       - id: "Qwen3.8-27B-Uncensored"
         name: "Qwen3.8-27B-Uncensored"
