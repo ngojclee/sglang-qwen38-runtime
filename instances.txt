@@ -1,0 +1,5 @@
+# Vast.ai Cluster Instances Registry
+# Format: <ssh_host> <ssh_port> <instance_id> [price_per_hour]
+# Machines are automatically sorted and prioritized by price (cheapest first)
+ssh7.vast.ai 13887 48333887 0.265
+ssh3.vast.ai 34593 48394592 0.290
