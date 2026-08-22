@@ -1,4 +1,6 @@
-import re, os
+import re, os, torch
+
+print("🚀 Applying Unified SGLang + Qwen 3.8 + DFlash2 Patches...")
 
 # 1. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
@@ -20,9 +22,7 @@ if os.path.exists(file_path):
         code = code.replace(target, replacement, 1)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(code)
-        print("Patched compressed_tensors.py successfully!")
-    else:
-        print("compressed_tensors.py already patched or target not found.")
+        print("✅ Patched compressed_tensors.py")
 
 # 2. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
@@ -36,7 +36,6 @@ if os.path.exists(qwen35_path):
             '"linear_attention": Qwen3_5LinearDecoderLayer,',
             '"linear_attention": Qwen3_5LinearDecoderLayer,\n    "full_attention": Qwen3_5AttentionDecoderLayer,'
         )
-        print("Patched qwen3_5.py ALL_DECODER_LAYER_TYPES full_attention successfully!")
 
     # B. get_layer prefix
     pattern = r'def get_layer\(idx: int, prefix: str\):[\s\S]*?return layer_class\('
@@ -53,7 +52,6 @@ if os.path.exists(qwen35_path):
                 prefix = add_prefix("linear_attn", prefix)
             return layer_class("""
     code2 = re.sub(pattern, new_sub, code2, count=1)
-    print("Patched qwen3_5.py get_layer via regex!")
 
     # C. Fix get_model_config_for_expert_location for dense models
     pattern_expert = r'@classmethod\s+def get_model_config_for_expert_location\(cls, config\):[\s\S]*?return ModelConfigForExpertLocation\([\s\S]*?\)'
@@ -67,7 +65,6 @@ if os.path.exists(qwen35_path):
             num_groups=None,
         )"""
     code2 = re.sub(pattern_expert, sub_expert, code2, count=1)
-    print("Patched qwen3_5.py expert location for dense models successfully!")
 
     # D. EntryClass registration
     if "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]" in code2:
@@ -75,9 +72,139 @@ if os.path.exists(qwen35_path):
             "EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]",
             "EntryClass = [Qwen3_5ForCausalLM, Qwen3_5MoeForCausalLM, Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]"
         )
-        print("Patched qwen3_5.py EntryClass successfully!")
         
     with open(qwen35_path, "w", encoding="utf-8") as f:
         f.write(code2)
+    print("✅ Patched qwen3_5.py")
 
-print("✅ All Core SGLang Patches Applied!")
+# 3. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
+wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
+if os.path.exists(wNa16_path):
+    with open(wNa16_path, "r", encoding="utf-8") as f:
+        code3 = f.read()
+
+    old_part = """        def transform_w_q(x):
+            assert isinstance(x, BasevLLMParameter)
+            permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+            x.data = gptq_marlin_repack(
+                x.data.contiguous(),
+                perm=layer.g_idx_sort_indices,
+                size_k=c.partition_weight_shape[0],
+                size_n=c.partition_weight_shape[1],
+                num_bits=c.weight_type.size_bits,
+            )
+            return x
+
+        def transform_w_s(x):
+            assert isinstance(x, BasevLLMParameter)
+            permute_param_layout_(x, input_dim=0, output_dim=1)
+            x.data = marlin_permute_scales(
+                x.data.contiguous(),
+                size_k=c.partition_weight_shape[0],
+                size_n=c.partition_weight_shape[1],
+                group_size=c.group_size,
+            )
+            return x"""
+
+    new_part = """        size_k = c.partition_weight_shape[0]
+        size_n = c.partition_weight_shape[1]
+        pad_n = (64 - (size_n % 64)) % 64
+        size_n_padded = size_n + pad_n
+        self.pad_n = pad_n
+        self.orig_size_n = size_n
+        self.size_n_padded = size_n_padded
+
+        def transform_w_q(x):
+            assert isinstance(x, BasevLLMParameter)
+            permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+            data = x.data
+            if pad_n > 0:
+                data = torch.nn.functional.pad(data, (0, pad_n), value=0)
+            x.data = gptq_marlin_repack(
+                data.contiguous(),
+                perm=layer.g_idx_sort_indices,
+                size_k=size_k,
+                size_n=size_n_padded,
+                num_bits=c.weight_type.size_bits,
+            )
+            return x
+
+        def transform_w_s(x):
+            assert isinstance(x, BasevLLMParameter)
+            permute_param_layout_(x, input_dim=0, output_dim=1)
+            data = x.data
+            if pad_n > 0:
+                data = torch.nn.functional.pad(data, (0, pad_n), value=1.0)
+            x.data = marlin_permute_scales(
+                data.contiguous(),
+                size_k=size_k,
+                size_n=size_n_padded,
+                group_size=c.group_size,
+            )
+            return x"""
+
+    if old_part in code3:
+        code3 = code3.replace(old_part, new_part, 1)
+
+    old_apply = """        return apply_gptq_marlin_linear(
+            input=x,
+            weight=w_q,
+            weight_scale=w_s,
+            weight_zp=w_zp,  # type: ignore
+            g_idx=w_gidx,  # type: ignore
+            g_idx_sort_indices=layer.g_idx_sort_indices,
+            workspace=self.workspace,
+            wtype=c.weight_type,
+            input_size_per_partition=c.partition_weight_shape[0],
+            output_size_per_partition=c.partition_weight_shape[1],
+            is_k_full=self.is_k_full,
+            bias=bias,
+        )"""
+
+    new_apply = """        pad_n = getattr(self, "pad_n", 0)
+        size_n_padded = getattr(self, "size_n_padded", c.partition_weight_shape[1])
+        orig_size_n = getattr(self, "orig_size_n", c.partition_weight_shape[1])
+
+        out = apply_gptq_marlin_linear(
+            input=x,
+            weight=w_q,
+            weight_scale=w_s,
+            weight_zp=w_zp,  # type: ignore
+            g_idx=w_gidx,  # type: ignore
+            g_idx_sort_indices=layer.g_idx_sort_indices,
+            workspace=self.workspace,
+            wtype=c.weight_type,
+            input_size_per_partition=c.partition_weight_shape[0],
+            output_size_per_partition=size_n_padded,
+            is_k_full=self.is_k_full,
+            bias=None if pad_n > 0 else bias,
+        )
+        if pad_n > 0:
+            out = out[..., :orig_size_n]
+            if bias is not None:
+                out.add_(bias)
+        return out"""
+
+    if old_apply in code3:
+        code3 = code3.replace(old_apply, new_apply, 1)
+
+    with open(wNa16_path, "w", encoding="utf-8") as f:
+        f.write(code3)
+    print("✅ Patched compressed_tensors_wNa16.py")
+
+# 4. Patch dflash.py (DFlash2DraftModel class registration)
+dflash_path = "/sgl-workspace/sglang/python/sglang/srt/models/dflash.py"
+if os.path.exists(dflash_path):
+    with open(dflash_path, "r", encoding="utf-8") as f:
+        code4 = f.read()
+
+    if "class DFlash2DraftModel" not in code4:
+        code4 = code4.replace(
+            "EntryClass = [DFlashDraftModel, DFlashLagunaForCausalLM]",
+            "class DFlash2DraftModel(DFlashDraftModel):\n    pass\n\n\nEntryClass = [DFlashDraftModel, DFlash2DraftModel, DFlashLagunaForCausalLM]"
+        )
+        with open(dflash_path, "w", encoding="utf-8") as f:
+            f.write(code4)
+        print("✅ Patched dflash.py (DFlash2DraftModel)")
+
+print("✨ All Unified SGLang Patches Applied Successfully!")
