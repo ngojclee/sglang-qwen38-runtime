@@ -112,7 +112,7 @@ if os.path.exists(mem_pool_path):
         f.write(code_mp)
     print("✅ Patched memory_pool.py (_transfer_full_attention_id + set_kv_buffer_prefix_valid)")
 
-# 3. Patch hybrid_linear_attn_backend.py (Support draft/pure attention models without mixed_qkv)
+# 3. Patch hybrid_linear_attn_backend.py (Support draft/pure attention models without mixed_qkv in all methods)
 hybrid_backend_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py"
 if os.path.exists(hybrid_backend_path):
     with open(hybrid_backend_path, "r", encoding="utf-8") as f:
@@ -129,15 +129,15 @@ if os.path.exists(hybrid_backend_path):
         assert layer_id is not None, "either layer or layer_id must be provided"
         return layer_id in self.full_attn_layers"""
 
-    if "_is_full_attn" in code_hb and "mixed_qkv: Optional[torch.Tensor]" not in code_hb:
+    if "_is_full_attn" in code_hb:
         code_hb = re.sub(pat_is_full, repl_is_full, code_hb, count=1)
         code_hb = code_hb.replace(
-            "if self._is_full_attn(layer, kwargs.get(\"layer_id\")):",
-            "if self._is_full_attn(layer, kwargs.get(\"layer_id\"), mixed_qkv):"
+            "self._is_full_attn(layer, kwargs.get(\"layer_id\"))",
+            "self._is_full_attn(layer, kwargs.get(\"layer_id\"), mixed_qkv)"
         )
         with open(hybrid_backend_path, "w", encoding="utf-8") as f:
             f.write(code_hb)
-        print("✅ Patched hybrid_linear_attn_backend.py (_is_full_attn draft fallback)")
+        print("✅ Patched hybrid_linear_attn_backend.py (_is_full_attn draft fallback across all methods)")
 
 # 4. Patch hybrid_arch.py
 hybrid_arch_path = "/sgl-workspace/sglang/python/sglang/srt/configs/hybrid_arch.py"
