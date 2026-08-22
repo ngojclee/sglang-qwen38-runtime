@@ -116,12 +116,18 @@ EOF
 
 echo "✅ Saved /etc/sglang-args.conf"
 
-# 8. Restart SGLang Service
-if command -v supervisorctl &>/dev/null; then
+# 8. Restart / Launch SGLang Service
+mkdir -p /var/log/portal
+
+if command -v supervisorctl &>/dev/null && supervisorctl status sglang &>/dev/null; then
     echo "🔄 Restarting SGLang via supervisorctl..."
     supervisorctl restart sglang || supervisorctl start sglang
 else
-    echo "⚠️ Supervisor not found. Running direct launch..."
+    echo "🚀 Launching SGLang directly in background..."
+    pkill -f "sglang.launch_server" 2>/dev/null || true
+    pkill -f "sglang serve" 2>/dev/null || true
+    sleep 1
+    nohup python3 -m sglang.launch_server --model-path "$BASE_MODEL_PATH" $(cat /etc/sglang-args.conf) > /var/log/portal/sglang.log 2>&1 &
 fi
 
 # 9. Verification Loop
