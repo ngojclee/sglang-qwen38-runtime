@@ -245,6 +245,9 @@
    * **Nếu cần mở rộng ngữ cảnh khổng lồ (>500K - 1 Triệu tokens)**: Bật `--kv-cache-dtype int4` ➔ Tiết kiệm tối đa bộ nhớ.
 2. **Dàn 4× RTX 5060 Ti 16GB (64GB VRAM - Máy C)**:
    * VRAM 64GB đủ sức chạy trọn vẹn 262K context ở cả **BF16 gốc, FP8 lẫn INT4** mà không cần offload ra RAM.
+3. **Quy Tắc Đặt `--mem-fraction-static` Theo Dung Lượng VRAM Từng Dòng Card**:
+   * **Card 24GB (RTX 3090 / 4090)**: Đặt `--mem-fraction-static 0.90`. 10% đệm tương đương **`2.45 GB VRAM`** tự do ➔ Đủ an toàn tuyệt đối cho Marlin GEMM / Triton kernels.
+   * **Card 16GB (RTX 5060 Ti / 4080)**: Bắt buộc đặt `--mem-fraction-static 0.85 – 0.88`. Nếu đặt `0.90`, 10% đệm chỉ còn **`1.60 GB`** ➔ Sẽ bị thiếu VRAM đệm cho activation prefill dẫn đến OOM.
 
 ### 🔍 Giải thích các cờ tối ưu sống còn:
 | Cờ cấu hình | Ý nghĩa & Tác dụng thực tế |
@@ -590,3 +593,77 @@ requires_openai_auth = true
 | **Model nói chuyện bằng chữ mà không chịu gọi Tool** | Model thiếu chỉ dẫn ép buộc hành động trong system prompt. | Khai báo `base_instructions` yêu cầu gọi Tool ngay lập tức trong `model_catalog.json`. |
 | **Hermes Desktop test SSH báo lỗi `#< CLIXML`** | OpenSSH trên Windows gán mặc định `pwsh.exe` gây bọc mã XML rác. | Xóa registry `DefaultShell` trong `HKLM:\SOFTWARE\OpenSSH` về chuẩn `cmd.exe`. |
 | **Hermes Gateway test báo `unrecognized arguments: --version`** | File parser `gateway.py` thiếu cờ `-V / --version`. | Bổ sung `add_argument('--version', action='version')` vào subcommand `gateway`. |
+
+---
+
+## 12. HƯỚNG DẪN CHẨN ĐOÁN MEMORY PRESSURE & QUY TRÌNH TINH CHỈNH 1 BIẾN DUY NHẤT (SINGLE-VARIABLE TUNING)
+
+> **Khái niệm cốt lõi:** **Memory pressure** là tình trạng GPU đã gần cạn VRAM đến mức engine không còn đủ "khoảng thở" (headroom) để cấp phát bộ nhớ động (dynamic allocation) cho các request hoặc kernel mới.  
+> **Lưu ý quan trọng:** Không chỉ nhìn `nvidia-smi` (vì SGLang tự động pre-allocate VRAM cho KV Cache). Cách chuẩn xác nhất là **kiểm chứng qua request thực tế**.
+
+### 🚦 1. Ba Cấp Độ Nhận Biết Memory Pressure (2× 3090 + Qwen3.8 + DFlash2):
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               3 CẤP ĐỘ TRẠNG THÁI MEMORY PRESSURE                                │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 🟢 MỨC 1: BÌNH THƯỜNG (NO PRESSURE)                                                             │
+│    • Dấu hiệu: VRAM còn ~2.0 - 2.4 GB khoảng thở tự do.                                         │
+│    • Request 200K: Load model ✅ | Prefill ✅ | Decode ✅ | DFlash2 ✅ | Tool Call ✅             │
+│    • Kết luận: Hoàn toàn ổn định, KHÔNG CÓ memory pressure. Giữ nguyên draft tokens = 8.        │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 🟡 MỨC 2: MEMORY PRESSURE CAO                                                                    │
+│    • Dấu hiệu: VRAM tự do < 500 MB.                                                              │
+│    • Model vẫn chạy câu ngắn, nhưng bắt đầu xuất hiện: "CUDA out of memory", "KV cache           │
+│      allocation failed", hoặc request 1 chạy được nhưng thêm request thứ 2 thì OOM.             │
+│    • Kết luận: Hệ thống thiếu khoảng thở đệm. Cần kiểm tra lại cấu hình.                         │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 🔴 MỨC 3: QUÁ TẢI (OOM OVERLOAD)                                                                 │
+│    • Dấu hiệu: Server khởi động được nhưng gửi request 200K bị OOM ngay lúc Prefill (Marlin GEMM)│
+│      hoặc: DFlash2 OFF thì PASS, DFlash2 ON thì OOM;                                            │
+│      hoặc: draft tokens = 8 thì OOM, draft tokens = 4 thì PASS.                                  │
+│    • Kết luận: Speculative decoding đang lấy thêm memory khiến workload vượt quá giới hạn.       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 🎯 2. Quy Trình Tinh Chỉnh Chuẩn Khoa Học: Chỉ Đổi 1 Biến Duy Nhất (Single-Variable Tuning):
+
+Khi tối ưu hóa hoặc kiểm tra một mức VRAM mới (ví dụ mốc 200K context), tuân thủ nghiêm ngặt cây quyết định:
+
+```text
+               GIỮ NGUYÊN: mem-fraction-static = 0.90
+                           draft tokens = 8 (hiện tại)
+                           DFlash2 = ON
+                                  │
+                                  ▼
+                         GỬI REQUEST TEST 200K
+                                  │
+                   ┌──────────────┴──────────────┐
+                   ▼                             ▼
+              [ ✅ PASS ]                   [ ❌ FAIL ]
+                   │                             │
+                   ▼                             ▼
+             GIỮ NGUYÊN                   XẢY RA MEMORY PRESSURE!
+      (Đạt 201K VRAM + 91.5 tok/s)        (Không đổi cùng lúc mem-fraction-static)
+                                                 │
+                                                 ▼
+                                     HẠ DRAFT TOKENS (8 ➔ 6 ➔ 4)
+                                     (Để giải phóng tensor DFlash2)
+                                                 │
+                                                 ▼
+                                        TEST LẠI ĐÚNG MỐC 200K
+                                                 │
+                                  ┌──────────────┴──────────────┐
+                                  ▼                             ▼
+                             [ ✅ PASS ]                   [ ❌ FAIL ]
+                                  │                             │
+                                  ▼                             ▼
+                            Chốt draft tokens        Mới xem xét nâng/hạ static
+```
+
+### 📌 Nguyên tắc cốt lõi:
+1. **Nếu đang PASS 100% ở 200K với 8 draft tokens ➔ GIỮ NGUYÊN 8 DRAFT TOKENS** để giữ tốc độ đỉnh cao nhất (không tự ý giảm xuống 6 nếu chưa có memory pressure).
+2. **Chỉ giảm draft tokens khi và chỉ khi gặp OOM ở đúng kịch bản đó.**
+3. **Mỗi lần can thiệp CHỈ THAY ĐỔI DUY NHẤT 1 BIẾN SỐ** để luôn nắm rõ nguyên nhân và kết quả.
