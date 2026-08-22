@@ -73,13 +73,17 @@ if os.path.exists(mem_pool_path):
     with open(mem_pool_path, "r", encoding="utf-8") as f:
         code_mp = f.read()
 
-    target_err = 'raise ValueError(\n                f"{layer_id=} not in full attention layers: {self.full_attention_layer_id_mapping.keys()}"\n            )'
-    repl_tf = "return layer_id % len(self.full_attention_layer_id_mapping) if self.full_attention_layer_id_mapping else 0"
+    pat_tf = r'def _transfer_full_attention_id\(self, layer_id: int\):[\s\S]*?return self\.full_attention_layer_id_mapping\[layer_id\]'
+    repl_tf = """def _transfer_full_attention_id(self, layer_id: int):
+        if layer_id not in self.full_attention_layer_id_mapping:
+            return layer_id % len(self.full_attention_layer_id_mapping) if self.full_attention_layer_id_mapping else 0
+        return self.full_attention_layer_id_mapping[layer_id]"""
 
-    if target_err in code_mp:
-        code_mp = code_mp.replace(target_err, repl_tf)
+    code_mp = re.sub(pat_tf, repl_tf, code_mp, count=1)
 
-    target_hl = "    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):\n        self.full_kv_pool.move_kv_cache(tgt_loc, src_loc)"
+    target_hl = """    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
+        self.full_kv_pool.move_kv_cache(tgt_loc, src_loc)"""
+
     prefix_valid_method = """    def set_kv_buffer_prefix_valid(
         self,
         layer: RadixAttention,
