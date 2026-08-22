@@ -73,20 +73,11 @@ if os.path.exists(mem_pool_path):
     with open(mem_pool_path, "r", encoding="utf-8") as f:
         code_mp = f.read()
 
-    old_tf = """    def _transfer_full_attention_id(self, layer_id: int):
-        if layer_id not in self.full_attention_layer_id_mapping:
-            raise ValueError(
-                f"{layer_id=} not in full attention layers: {self.full_attention_layer_id_mapping.keys()}"
-            )
-        return self.full_attention_layer_id_mapping[layer_id]"""
+    target_err = 'raise ValueError(\n                f"{layer_id=} not in full attention layers: {self.full_attention_layer_id_mapping.keys()}"\n            )'
+    repl_tf = "return layer_id % len(self.full_attention_layer_id_mapping) if self.full_attention_layer_id_mapping else 0"
 
-    new_tf = """    def _transfer_full_attention_id(self, layer_id: int):
-        if layer_id not in self.full_attention_layer_id_mapping:
-            return layer_id % len(self.full_attention_layer_id_mapping) if self.full_attention_layer_id_mapping else 0
-        return self.full_attention_layer_id_mapping[layer_id]"""
-
-    if old_tf in code_mp:
-        code_mp = code_mp.replace(old_tf, new_tf, 1)
+    if target_err in code_mp:
+        code_mp = code_mp.replace(target_err, repl_tf)
         with open(mem_pool_path, "w", encoding="utf-8") as f:
             f.write(code_mp)
         print("✅ Patched memory_pool.py (_transfer_full_attention_id fallback)")
