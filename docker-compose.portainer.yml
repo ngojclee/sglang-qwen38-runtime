@@ -290,6 +290,9 @@ services:
 
                     # B. Chưa quá timeout: Quét trực tiếp trên Vast API và TẮT ngay các máy không phải Leader
                     else:
+                        primary_leader = current_active_node or (nodes[0] if nodes else None)
+                        leader_id = str(primary_leader.get("instance_id")) if primary_leader else None
+                        
                         url = f"https://console.vast.ai/api/v1/instances/?api_key={VAST_API_KEY}"
                         try:
                             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -301,12 +304,10 @@ services:
                                         inst_id = str(inst.get("id"))
                                         actual_status = inst.get("actual_status") or inst.get("intended_status")
                                         
-                                        # Nếu máy đang chạy trên Vast nhưng KHÔNG phải là Leader hiện tại -> Gửi lệnh STOP ngay
-                                        if actual_status == "running":
-                                            if not current_active_node or str(current_active_node.get("instance_id")) != inst_id:
-                                                leader_id = current_active_node.get('instance_id') if current_active_node else 'None'
-                                                print(f"💰 Auto-stopping redundant machine {inst_id} on Vast.ai (keeping single active leader {leader_id})...", flush=True)
-                                                await set_instance_state(inst_id, "stopped")
+                                        # Nếu máy đang chạy trên Vast nhưng KHÔNG phải là Primary Leader -> Gửi lệnh STOP ngay
+                                        if actual_status == "running" and leader_id and inst_id != leader_id:
+                                            print(f"💰 Auto-stopping redundant machine {inst_id} on Vast.ai (keeping single active leader {leader_id})...", flush=True)
+                                            await set_instance_state(inst_id, "stopped")
                         except Exception as e:
                             print(f"⚠️ Error checking redundant instances on Vast: {e}", flush=True)
             asyncio.create_task(scaler_loop())
@@ -349,6 +350,8 @@ services:
                     upstream_resp = await client.send(req_stream, stream=True)
 
                     async def sse_generator():
+                        tool_mode = False
+                        has_emitted_meaningful_text = False
                         try:
                             async for line in upstream_resp.aiter_lines():
                                 if not line: continue
@@ -358,16 +361,26 @@ services:
                                         choices = data.get("choices", [])
                                         if choices:
                                             delta = choices[0].get("delta", {})
-                                            # Fix Issue #29441: Drop naked empty content chunks before tool calls
-                                            if "content" in delta and delta.get("content") == "" and not delta.get("tool_calls") and not delta.get("reasoning_content"):
-                                                if not delta.get("role"):
-                                                    continue
-                                                else:
-                                                    del delta["content"]
+                                            content = delta.get("content")
+                                            tool_calls = delta.get("tool_calls")
                                             
-                                            # Strip empty content if tool_calls is present
-                                            if delta.get("tool_calls") and delta.get("content") == "":
-                                                del delta["content"]
+                                            # State machine tracking
+                                            if tool_calls:
+                                                tool_mode = True
+                                            
+                                            # Issue #29441 & #24293: State-Aware Whitespace Filter
+                                            if isinstance(content, str) and content.strip() == "":
+                                                if tool_mode or not has_emitted_meaningful_text:
+                                                    if tool_calls:
+                                                        del delta["content"]
+                                                    else:
+                                                        if not delta.get("role"):
+                                                            continue # Drop naked whitespace chunk before/during tool calls
+                                                        else:
+                                                            del delta["content"]
+                                            elif isinstance(content, str) and content.strip() != "":
+                                                has_emitted_meaningful_text = True
+                                                tool_mode = False
                                                 
                                             line = "data: " + json.dumps(data, ensure_ascii=False)
                                     except:
