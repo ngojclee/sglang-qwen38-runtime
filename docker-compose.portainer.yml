@@ -5,15 +5,13 @@ networks:
     driver: bridge
 
 services:
-  # ===== 1. DYNAMIC TUNNEL MANAGER (TỰ ĐỌC FILE INSTANCES.TXT & AUTO-SYNC KEY) =====
+  # ===== 1. DYNAMIC TUNNEL MANAGER (TỰ ĐỌC FILE INSTANCES.TXT & MỞ CỔNG TỨC THÌ) =====
   vast-tunnel:
     image: alpine:latest
     restart: unless-stopped
     container_name: vast-tunnel
     networks:
       - vast-net
-    environment:
-      - API_LLM_SERVER=${API_LLM_SERVER}
     volumes:
       - /home/Docker/vast-tunnel/ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/Docker/vast-tunnel/ssh/known_hosts:/root/.ssh/known_hosts:rw
@@ -38,22 +36,7 @@ services:
             
             if [ -n "$$HOST" ] && [ -n "$$PORT" ]; then
               if ! pgrep -f "0.0.0.0:$$PORT_INDEX:127.0.0.1:18000" > /dev/null 2>&1; then
-                echo "🔗 Opening tunnel on port $$PORT_INDEX to $$HOST:$$PORT..."
-                
-                # 1. Đồng bộ key tự động vào máy đích
-                if [ -n "$$API_LLM_SERVER" ]; then
-                  ssh -q -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 -p $$PORT root@$$HOST "
-                    if [ -f /etc/sglang-args.conf ]; then
-                      if ! grep -q -- \"--api-key $$API_LLM_SERVER\" /etc/sglang-args.conf; then
-                        sed -i 's/--api-key [^ ]*//g' /etc/sglang-args.conf
-                        sed -i \"s/$/ --api-key $$API_LLM_SERVER/\" /etc/sglang-args.conf
-                        supervisorctl restart sglang 2>/dev/null || true
-                      fi
-                    fi
-                  " 2>/dev/null || true
-                fi
-
-                # 2. Duy trì kết nối SSH Tunnel
+                echo "🔗 Spawning background tunnel on port $$PORT_INDEX to $$HOST:$$PORT..."
                 (while true; do
                   ssh -q -N -g -L 0.0.0.0:$$PORT_INDEX:127.0.0.1:18000 \
                       -o GatewayPorts=yes \
@@ -130,7 +113,7 @@ services:
 
         sync_cpa_config()
 
-        # 2. Đọc danh sách máy (Host, Port, Instance_ID)
+        # 2. Đọc danh sách máy
         def get_cluster_nodes():
             nodes = []
             inst_path = "/etc/vast/instances.txt"
@@ -159,7 +142,6 @@ services:
                     idle_seconds = time.time() - last_global_activity
                     nodes = get_cluster_nodes()
 
-                    # A. Nếu tất cả đều idle > timeout -> Tắt toàn bộ
                     if idle_seconds > (IDLE_TIMEOUT_MINUTES * 60):
                         for node in nodes:
                             if node["instance_id"]:
@@ -170,9 +152,7 @@ services:
                                 except Exception as e:
                                     print(f"Error stopping instance: {e}", flush=True)
                     
-                    # B. Nếu đang có nhiều máy cùng live -> Tắt các máy phụ thừa, chỉ giữ 1 máy chính
                     elif len(nodes) > 1:
-                        # Kiểm tra máy chính (Primary) có live không
                         primary_live = False
                         try:
                             headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
@@ -182,14 +162,13 @@ services:
                         except:
                             primary_live = False
                         
-                        # Nếu máy chính đang live gánh tải -> Tắt các máy phụ thừa để tiết kiệm tiền
                         if primary_live:
                             for node in nodes[1:]:
                                 if node["instance_id"]:
                                     try:
                                         async with httpx.AsyncClient(timeout=10) as c:
                                             await c.put(f"https://console.vast.ai/api/v0/instances/{node['instance_id']}/?api_key={VAST_API_KEY}", json={"state": "stopped"})
-                                            print(f"💰 Primary node is active. Auto-stopped redundant secondary instance {node['instance_id']}!", flush=True)
+                                            print(f"💰 Primary active. Stopped redundant secondary instance {node['instance_id']}!", flush=True)
                                     except:
                                         pass
             asyncio.create_task(cleaner_loop())
@@ -216,6 +195,7 @@ services:
                             resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
                             return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers, media_type=resp.headers.get("content-type"))
                         except Exception as e:
+                            print(f"Target {node['target']} err: {e}", flush=True)
                             continue
                     
                     return Response(content=b'{"error": "No reachable Vast instance in pool"}', status_code=503)
