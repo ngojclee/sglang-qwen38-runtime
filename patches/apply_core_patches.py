@@ -2,69 +2,67 @@ import re, os, torch
 
 print("🚀 Applying Unified SGLang + Qwen 3.8 + DFlash2 Patches...")
 
-# 1. Patch hybrid_arch.py (Attach Qwen3_5TextConfig helpers + hybrid_gdn_config support)
+# 1. Patch transformers configuration_qwen3_5.py
+trans_qwen35 = "/usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_5/configuration_qwen3_5.py"
+if os.path.exists(trans_qwen35):
+    with open(trans_qwen35, "r", encoding="utf-8") as f:
+        code_t = f.read()
+
+    props = """
+    @property
+    def full_attention_layer_ids(self):
+        if hasattr(self, "layers_block_type") and self.layers_block_type:
+            return [i for i, t in enumerate(self.layers_block_type) if t in ("attention", "full_attention")]
+        interval = getattr(self, "full_attention_interval", 4)
+        return [i for i in range(self.num_hidden_layers) if (i + 1) % interval == 0]
+
+    @property
+    def linear_attention_layer_ids(self):
+        full = set(self.full_attention_layer_ids)
+        return [i for i in range(self.num_hidden_layers) if i not in full]
+
+    @property
+    def mamba2_cache_params(self):
+        from sglang.srt.configs.mamba_utils import Mamba2CacheParams, Mamba2StateShape, mamba2_state_dtype
+        from sglang.srt.distributed.parallel_state import get_parallel
+
+        linear_key_head_dim = getattr(self, "linear_key_head_dim", 128)
+        linear_num_key_heads = getattr(self, "linear_num_key_heads", 16)
+        linear_value_head_dim = getattr(self, "linear_value_head_dim", 128)
+        linear_num_value_heads = getattr(self, "linear_num_value_heads", 16)
+        linear_conv_kernel_dim = getattr(self, "linear_conv_kernel_dim", 4)
+
+        key_dim = linear_key_head_dim * linear_num_key_heads
+        value_dim = linear_value_head_dim * linear_num_value_heads
+        shape = Mamba2StateShape.create(
+            tp_world_size=get_parallel().attn_tp_size,
+            intermediate_size=value_dim,
+            n_groups=linear_num_key_heads,
+            num_heads=linear_num_value_heads,
+            head_dim=linear_value_head_dim,
+            state_size=linear_key_head_dim,
+            conv_kernel=linear_conv_kernel_dim,
+            conv_shard_groups=[key_dim, key_dim, value_dim],
+        )
+        return Mamba2CacheParams(
+            shape=shape, layers=self.linear_attention_layer_ids, dtype=mamba2_state_dtype(self)
+        )
+"""
+    target_q = "class Qwen3_5TextConfig(PreTrainedConfig):"
+    if target_q in code_t:
+        # Strip existing if already present
+        if "def mamba2_cache_params" in code_t:
+            code_t = re.sub(r'class Qwen3_5TextConfig\(PreTrainedConfig\):[\s\S]*?@property\s+def mamba2_cache_params[\s\S]*?dtype=mamba2_state_dtype\(self\)\s+\)', target_q, code_t)
+        code_t = code_t.replace(target_q, target_q + props)
+        with open(trans_qwen35, "w", encoding="utf-8") as f:
+            f.write(code_t)
+        print("✅ Patched transformers configuration_qwen3_5.py directly")
+
+# 2. Patch hybrid_arch.py (Attach Qwen3_5TextConfig helpers + hybrid_gdn_config support)
 hybrid_arch_path = "/sgl-workspace/sglang/python/sglang/srt/configs/hybrid_arch.py"
 if os.path.exists(hybrid_arch_path):
     with open(hybrid_arch_path, "r", encoding="utf-8") as f:
         code_h = f.read()
-
-    helpers_patch = """
-try:
-    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig, Qwen3_5Config
-    for cls in (Qwen3_5TextConfig, Qwen3_5Config):
-        if not hasattr(cls, "full_attention_layer_ids"):
-            @property
-            def _full_attention_layer_ids(self):
-                if hasattr(self, "layers_block_type") and self.layers_block_type:
-                    return [i for i, t in enumerate(self.layers_block_type) if t in ("attention", "full_attention")]
-                interval = getattr(self, "full_attention_interval", 4)
-                return [i for i in range(self.num_hidden_layers) if (i + 1) % interval == 0]
-            cls.full_attention_layer_ids = _full_attention_layer_ids
-
-        if not hasattr(cls, "linear_attention_layer_ids"):
-            @property
-            def _linear_attention_layer_ids(self):
-                full = set(self.full_attention_layer_ids)
-                return [i for i in range(self.num_hidden_layers) if i not in full]
-            cls.linear_attention_layer_ids = _linear_attention_layer_ids
-
-        if not hasattr(cls, "mamba2_cache_params"):
-            @property
-            def _mamba2_cache_params(self):
-                from sglang.srt.configs.mamba2 import Mamba2CacheParams, Mamba2StateShape, mamba2_state_dtype
-                from sglang.srt.distributed.parallel_state import get_parallel
-
-                linear_key_head_dim = getattr(self, "linear_key_head_dim", 128)
-                linear_num_key_heads = getattr(self, "linear_num_key_heads", 16)
-                linear_value_head_dim = getattr(self, "linear_value_head_dim", 128)
-                linear_num_value_heads = getattr(self, "linear_num_value_heads", 16)
-                linear_conv_kernel_dim = getattr(self, "linear_conv_kernel_dim", 4)
-
-                key_dim = linear_key_head_dim * linear_num_key_heads
-                value_dim = linear_value_head_dim * linear_num_value_heads
-                shape = Mamba2StateShape.create(
-                    tp_world_size=get_parallel().attn_tp_size,
-                    intermediate_size=value_dim,
-                    n_groups=linear_num_key_heads,
-                    num_heads=linear_num_value_heads,
-                    head_dim=linear_value_head_dim,
-                    state_size=linear_key_head_dim,
-                    conv_kernel=linear_conv_kernel_dim,
-                    conv_shard_groups=[key_dim, key_dim, value_dim],
-                )
-                return Mamba2CacheParams(
-                    shape=shape, layers=self.linear_attention_layer_ids, dtype=mamba2_state_dtype(self)
-                )
-            cls.mamba2_cache_params = _mamba2_cache_params
-except Exception as e:
-    pass
-"""
-    # Replace existing helpers_patch
-    if "def _mamba2_cache_params" not in code_h:
-        # strip old helpers if present
-        if "try:\n    from transformers.models.qwen3_5.configuration_qwen3_5" in code_h:
-            code_h = code_h.split("try:\n    from transformers.models.qwen3_5.configuration_qwen3_5")[0]
-        code_h = code_h + "\n" + helpers_patch
 
     pattern_h = r'def hybrid_gdn_config\(model_config: ModelConfig\):[\s\S]*?config = model_config\.hf_config\.get_text_config\(\)[\s\S]*?if isinstance\('
     repl_h = """def hybrid_gdn_config(model_config: ModelConfig):
@@ -76,9 +74,9 @@ except Exception as e:
 
     with open(hybrid_arch_path, "w", encoding="utf-8") as f:
         f.write(code_h)
-    print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & mamba2_cache_params)")
+    print("✅ Patched hybrid_arch.py")
 
-# 2. Patch kv_cache_configurator.py
+# 3. Patch kv_cache_configurator.py
 kv_config_path = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py"
 if os.path.exists(kv_config_path):
     with open(kv_config_path, "r", encoding="utf-8") as f:
@@ -94,7 +92,7 @@ if os.path.exists(kv_config_path):
         f.write(code_k)
     print("✅ Patched kv_cache_configurator.py")
 
-# 3. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
+# 4. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
 model_config_path = "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py"
 if os.path.exists(model_config_path):
     with open(model_config_path, "r", encoding="utf-8") as f:
@@ -117,7 +115,7 @@ if os.path.exists(model_config_path):
             f.write(code_mc)
         print("✅ Patched model_config.py (get_hybrid_layer_ids for Qwen 3.5/3.8)")
 
-# 4. Patch compressed_tensors.py
+# 5. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
 if os.path.exists(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -139,7 +137,7 @@ if os.path.exists(file_path):
             f.write(code)
         print("✅ Patched compressed_tensors.py")
 
-# 5. Patch qwen3_5.py
+# 6. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
@@ -192,7 +190,7 @@ if os.path.exists(qwen35_path):
         f.write(code2)
     print("✅ Patched qwen3_5.py")
 
-# 6. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
+# 7. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
 wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 if os.path.exists(wNa16_path):
     with open(wNa16_path, "r", encoding="utf-8") as f:
@@ -307,7 +305,7 @@ if os.path.exists(wNa16_path):
         f.write(code3)
     print("✅ Patched compressed_tensors_wNa16.py")
 
-# 7. Patch dflash.py (DFlash2DraftModel class registration)
+# 8. Patch dflash.py (DFlash2DraftModel class registration)
 dflash_path = "/sgl-workspace/sglang/python/sglang/srt/models/dflash.py"
 if os.path.exists(dflash_path):
     with open(dflash_path, "r", encoding="utf-8") as f:
