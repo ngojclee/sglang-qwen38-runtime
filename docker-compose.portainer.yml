@@ -5,7 +5,7 @@ networks:
     driver: bridge
 
 services:
-  # ===== 1. MULTI-TUNNEL SIDECAR (KẾT NỐI SSH TẤT CẢ CÁC MÁY) =====
+  # ===== 1. MULTI-TUNNEL SIDECAR (DUY TRÌ KẾT NỐI SSH LIÊN TỤC) =====
   vast-tunnel:
     image: alpine:latest
     restart: unless-stopped
@@ -20,10 +20,8 @@ services:
       - -c
       - |
         apk add --no-cache openssh-client
-        # Machine D (Live hiện tại) -> forward ra cổng 18001 (-g cho phép container khác kết nối)
-        (while true; do ssh -N -g -L 0.0.0.0:18001:127.0.0.1:18000 -o GatewayPorts=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887; sleep 5; done) &
-        # Machine C (Khi nào bật sẽ tự connect) -> forward ra cổng 18002
-        (while true; do ssh -N -g -L 0.0.0.0:18002:127.0.0.1:18000 -o GatewayPorts=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh5.vast.ai -p 15185; sleep 10; done) &
+        # Machine D (Forward cổng 18001 sang Máy D)
+        (while true; do ssh -q -N -g -L 0.0.0.0:18001:127.0.0.1:18000 -o GatewayPorts=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -i /root/.ssh/id_ed25519 root@ssh7.vast.ai -p 13887 2>/dev/null; sleep 5; done) &
         wait
     logging:
       driver: json-file
@@ -31,51 +29,160 @@ services:
         max-size: "10m"
         max-file: "2"
 
-  # ===== 2. VAST GATEWAY (TỰ QUÉT VÀ ĐẨY REQUEST VỀ MÁY LIVE) =====
+  # ===== 2. VAST GATEWAY (ROUTER THÔNG MINH - CHECK 0MS - KHÔNG TIMEOUT) =====
   vast-gateway:
-    image: haproxy:alpine
+    image: python:3.11-alpine
     container_name: vast-gateway
     restart: unless-stopped
-    user: root
     networks:
       - vast-net
     ports:
       - "18000:18000"
+    environment:
+      - VAST_API_KEY=${VAST_API_KEY}
+      - API_LLM_SERVER=${API_LLM_SERVER:-440814feeb19271add76131d439819011ef4018ea46a3ffd0c1df266b4308b55}
+      - VAST_PROVIDER_NAME=${VAST_PROVIDER_NAME:-ln.vastai}
+      - INSTANCE_POOL=${INSTANCE_POOL:-13887}
+      - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-30}
+      - BACKEND_TARGETS=vast-tunnel:18001
+    volumes:
+      - /home/Docker/CLIProxyAPI/config.yaml:/cpa-config.yaml:rw
     entrypoint:
       - /bin/sh
       - -c
       - |
-        cat << 'EOF' > /tmp/haproxy.cfg
-        global
-            chroot /
-            user root
-            log stdout format raw local0
-            maxconn 4096
+        pip install --no-cache-dir fastapi uvicorn httpx
+        cat << 'EOF' > /app.py
+        import asyncio, os, time, re, httpx
+        from fastapi import FastAPI, Request
+        from fastapi.responses import StreamingResponse
 
-        defaults
-            log     global
-            mode    http
-            option  httplog
-            option  dontlognull
-            timeout connect 5000ms
-            timeout client  600000ms
-            timeout server  600000ms
+        app = FastAPI()
+        VAST_API_KEY = os.getenv("VAST_API_KEY", "")
+        API_LLM_SERVER = os.getenv("API_LLM_SERVER", "")
+        PROVIDER_NAME = os.getenv("VAST_PROVIDER_NAME", "ln.vastai")
+        INSTANCE_POOL = [i.strip() for i in os.getenv("INSTANCE_POOL", "").split(",") if i.strip()]
+        BACKENDS = [b.strip() for b in os.getenv("BACKEND_TARGETS", "").split(",") if b.strip()]
+        IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
 
-        frontend sglang_in
-            bind *:18000
-            default_backend sglang_pool
+        # 1. Tự động đồng bộ config.yaml cho CPA
+        def sync_cpa_config():
+            conf_path = "/cpa-config.yaml"
+            if not os.path.exists(conf_path) or not API_LLM_SERVER:
+                return
+            try:
+                with open(conf_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                pattern = rf'(- name:\s*{re.escape(PROVIDER_NAME)}[\s\S]*?base-url:\s*)[^\n]+([\s\S]*?- api-key:\s*)[^\n]+'
+                replacement = rf'\g<1>http://vast-gateway:18000/v1\g<2>{API_LLM_SERVER}'
+                if re.search(rf'- name:\s*{re.escape(PROVIDER_NAME)}', content):
+                    new_content = re.sub(pattern, replacement, content, count=1)
+                    if new_content != content:
+                        with open(conf_path, "w", encoding="utf-8") as f:
+                            f.write(new_content)
+                        print(f"🎉 Auto-synced CPA config for provider '{PROVIDER_NAME}'!", flush=True)
+            except Exception as e:
+                print(f"⚠️ Error syncing CPA config: {e}", flush=True)
 
-        backend sglang_pool
-            mode http
-            balance roundrobin
-            option httpchk
-            http-check send meth GET uri /v1/models ver HTTP/1.1 hdr Host localhost
-            http-check expect status 200
-            default-server check inter 3s fall 2 rise 1
-            server machine_d vast-tunnel:18001 check
-            server machine_c vast-tunnel:18002 check
+        sync_cpa_config()
+
+        # 2. Logic điều phối
+        last_activity = time.time()
+        active_inst = None
+        active_backend = None
+        lock = asyncio.Lock()
+        http_client = httpx.AsyncClient(timeout=600.0)
+
+        async def check_backend(target):
+            try:
+                headers = {"Authorization": f"Bearer {API_LLM_SERVER}"} if API_LLM_SERVER else {}
+                r = await http_client.get(f"http://{target}/v1/models", headers=headers, timeout=2.0)
+                # 200 OK hoặc 401 chứng minh SGLang đang chạy và phản hồi tức thì
+                return r.status_code in (200, 401)
+            except:
+                return False
+
+        async def set_instance_state(inst_id, state):
+            if not VAST_API_KEY: return False
+            url = f"https://console.vast.ai/api/v0/instances/{inst_id}/?api_key={VAST_API_KEY}"
+            try:
+                r = await http_client.put(url, json={"state": state}, timeout=10.0)
+                return r.status_code == 200
+            except:
+                return False
+
+        async def ensure_live_backend():
+            global active_inst, active_backend, last_activity
+            last_activity = time.time()
+            async with lock:
+                if active_backend and await check_backend(active_backend):
+                    return active_backend
+                
+                for i, target in enumerate(BACKENDS):
+                    if await check_backend(target):
+                        active_backend = target
+                        active_inst = INSTANCE_POOL[i] if i < len(INSTANCE_POOL) else None
+                        print(f"⚡ Instant routing to live backend: {target}", flush=True)
+                        return target
+
+                # Chỉ khi tất cả đều tắt thì mới kích hoạt cold-start
+                target_inst = INSTANCE_POOL[0] if INSTANCE_POOL else None
+                target_backend = BACKENDS[0] if BACKENDS else None
+                if target_inst and VAST_API_KEY:
+                    print(f"🚀 Cold-starting instance {target_inst}...", flush=True)
+                    await set_instance_state(target_inst, "running")
+                    start_t = time.time()
+                    while time.time() - start_t < 90:
+                        await asyncio.sleep(3)
+                        if await check_backend(target_backend):
+                            print(f"🎉 Instance {target_inst} is now LIVE!", flush=True)
+                            active_inst = target_inst
+                            active_backend = target_backend
+                            return target_backend
+                        print(f"   Waiting for SGLang boot... ({int(time.time() - start_t)}s)", flush=True)
+                return target_backend
+
+        @app.on_event("startup")
+        async def bg_watcher():
+            async def idle_loop():
+                global active_inst, active_backend
+                while True:
+                    await asyncio.sleep(60)
+                    if active_inst and VAST_API_KEY and (time.time() - last_activity > IDLE_TIMEOUT_MINUTES * 60):
+                        print(f"💤 Idle {IDLE_TIMEOUT_MINUTES}m. Stopping instance {active_inst}...", flush=True)
+                        await set_instance_state(active_inst, "stopped")
+                        active_inst = None
+                        active_backend = None
+            asyncio.create_task(idle_loop())
+
+        @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
+        async def proxy(req: Request, path: str):
+            global last_activity
+            last_activity = time.time()
+            target = await ensure_live_backend()
+            url = f"http://{target}/{path}"
+            if req.url.query: url += f"?{req.url.query}"
+            
+            body = await req.body()
+            headers = dict(req.headers)
+            headers.pop("host", None)
+            
+            upstream_req = http_client.build_request(method=req.method, url=url, headers=headers, content=body)
+            resp = await http_client.send(upstream_req, stream=True)
+            
+            resp_headers = dict(resp.headers)
+            resp_headers.pop("content-length", None)
+            resp_headers.pop("transfer-encoding", None)
+            resp_headers.pop("content-encoding", None)
+            
+            return StreamingResponse(
+                resp.aiter_raw(),
+                status_code=resp.status_code,
+                headers=resp_headers,
+                background=None
+            )
         EOF
-        haproxy -f /tmp/haproxy.cfg
+        python -m uvicorn app:app --host 0.0.0.0 --port 18000
 
   # ===== 3. CLIPROXYAPI (CPA) =====
   cli-proxy-api:
@@ -103,10 +210,3 @@ services:
       - /home/Docker/CLIProxyAPI/plugins:/CLIProxyAPI/plugins:rw
       - /home/Docker/CLIProxyAPI/logs:/CLIProxyAPI/logs:rw
       - /home/Docker/CLIProxyAPI/opencodex:/data/opencodex:rw
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "5"
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
