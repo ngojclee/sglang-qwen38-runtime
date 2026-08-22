@@ -45,7 +45,30 @@ except Exception as e:
         f.write(code_h)
     print("✅ Patched hybrid_arch.py (Qwen3_5TextConfig helpers & registration)")
 
-# 2. Patch compressed_tensors.py
+# 2. Patch model_config.py (get_hybrid_layer_ids for Qwen 3.5 / 3.8)
+model_config_path = "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py"
+if os.path.exists(model_config_path):
+    with open(model_config_path, "r", encoding="utf-8") as f:
+        code_mc = f.read()
+
+    qwen_hybrid_branch = """    elif any(arch in ("Qwen3_5ForCausalLM", "Qwen3_5MoeForCausalLM", "Qwen3NextForCausalLM") for arch in model_architectures) or getattr(hf_text_config, "model_type", "") in ("qwen3_5", "qwen3_5_text", "qwen3_next", "qwen3"):
+        layer_types = getattr(hf_text_config, "layers_block_type", None) or getattr(hf_text_config, "layer_types", None)
+        if layer_types is not None:
+            swa_attention_layer_ids = [i for i, x in enumerate(layer_types) if x in ("linear_attention", "sliding_attention")]
+            full_attention_layer_ids = [i for i, x in enumerate(layer_types) if x in ("attention", "full_attention")]
+        else:
+            interval = getattr(hf_text_config, "full_attention_interval", 4)
+            swa_attention_layer_ids = [i for i in range(num_hidden_layers) if (i + 1) % interval != 0]
+            full_attention_layer_ids = [i for i in range(num_hidden_layers) if (i + 1) % interval == 0]"""
+
+    target_mc = "    if \"Llama4ForConditionalGeneration\" in model_architectures:"
+    if target_mc in code_mc and "Qwen3_5ForCausalLM" not in code_mc:
+        code_mc = code_mc.replace(target_mc, target_mc + "\n" + qwen_hybrid_branch, 1)
+        with open(model_config_path, "w", encoding="utf-8") as f:
+            f.write(code_mc)
+        print("✅ Patched model_config.py (get_hybrid_layer_ids for Qwen 3.5/3.8)")
+
+# 3. Patch compressed_tensors.py
 file_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py"
 if os.path.exists(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -67,7 +90,7 @@ if os.path.exists(file_path):
             f.write(code)
         print("✅ Patched compressed_tensors.py")
 
-# 3. Patch qwen3_5.py
+# 4. Patch qwen3_5.py
 qwen35_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py"
 if os.path.exists(qwen35_path):
     with open(qwen35_path, "r", encoding="utf-8") as f:
@@ -120,7 +143,7 @@ if os.path.exists(qwen35_path):
         f.write(code2)
     print("✅ Patched qwen3_5.py")
 
-# 4. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
+# 5. Patch compressed_tensors_wNa16.py (Marlin repack pad for linear attention 48 dim)
 wNa16_path = "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 if os.path.exists(wNa16_path):
     with open(wNa16_path, "r", encoding="utf-8") as f:
@@ -235,7 +258,7 @@ if os.path.exists(wNa16_path):
         f.write(code3)
     print("✅ Patched compressed_tensors_wNa16.py")
 
-# 5. Patch dflash.py (DFlash2DraftModel class registration)
+# 6. Patch dflash.py (DFlash2DraftModel class registration)
 dflash_path = "/sgl-workspace/sglang/python/sglang/srt/models/dflash.py"
 if os.path.exists(dflash_path):
     with open(dflash_path, "r", encoding="utf-8") as f:
