@@ -24,3 +24,5 @@ cd /workspace/runtime && bash vllm-profiles/bootstrap_vllm.sh
 - Experimental configs → `PROFILE_5060TI_LONG_KVARN_EXPERIMENTAL`, never edit V1.
 - 200K claim requires actual prompt tokens >= 200K (tokenizer-counted, not words).
 - Every optimization needs an A/B result.
+- **Reproducibility NOT yet verified on a fresh instance** (Phase B skipped by
+  user, cost). This profile + bootstrap are the snapshot, not a proof.

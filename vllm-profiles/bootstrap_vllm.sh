@@ -63,10 +63,16 @@ DRAFT=$WORK/qwen-serving/models/Qwen3.8-27B-DFlash2-W4A16
 PY=/usr/bin/python3
 VER=$($PY -c "import vllm; print(vllm.__version__)" 2>/dev/null)
 [ "$VER" = "0.27.1" ] || die "vLLM version mismatch: got '$VER', expected 0.27.1"
+SP=$($PY -c 'import vllm, os; print(os.path.dirname(vllm.__file__))' 2>/dev/null | tail -n1)
 $PY -c "from vllm.v1.attention.backends.registry import AttentionBackendEnum; AttentionBackendEnum.KVARN.get_class()" 2>/dev/null \
   || die "KVarN backend not importable (run kvarn/install.sh)"
+# 13-patch marker set (spot checks)
+[ -f "$SP/model_executor/models/qwen3_dflash2.py" ] || die "dflash2-backport.patch not applied"
+[ -f "$SP/v1/attention/backends/kvarn_attn.py" ] || die "kvarn modules not installed"
+grep -q "VLLM_MARLIN_INT8_INCLUDE_RE" "$SP/envs.py" || die "marlin-int8-layer-select.patch not applied"
+grep -q "VLLM_DFLASH2_LOOKUP" "$SP/v1/worker/gpu/spec_decode/dflash2/speculator.py" || die "dflash2-lookup-drafting.patch not applied"
 [ -f "$REPO/venv/bin/vllm" ] || { mkdir -p "$REPO/venv/bin"; ln -sf /usr/local/bin/vllm "$REPO/venv/bin/vllm"; ln -sf "$PY" "$REPO/venv/bin/python"; ln -sf "$PY" "$REPO/venv/bin/python3"; }
-say "pre-launch checks OK (model, drafter, vllm $VER, KVarN backend)"
+say "pre-launch checks OK (model, drafter, vllm $VER, KVarN backend, 13-patch markers)"
 
 # ---------------------------------------------------------------
 # Launch PROFILE_5060TI_LONG_KVARN_V1 (exact frozen command)
