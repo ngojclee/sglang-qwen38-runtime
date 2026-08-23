@@ -145,6 +145,14 @@ services:
                             inst_id = inst.get("id")
                             ssh_host = inst.get("ssh_host")
                             ssh_port = inst.get("ssh_port")
+                            # Ưu tiên Direct IP + port 22 (proxy Vast đôi khi "Connection closed" khi nhiều tunnel)
+                            public_ip = inst.get("public_ipaddr")
+                            direct_port = None
+                            p22 = (inst.get("ports") or {}).get("22/tcp") if isinstance(inst.get("ports"), dict) else None
+                            if isinstance(p22, list) and p22 and isinstance(p22[0], dict):
+                                direct_port = p22[0].get("HostPort")
+                            if public_ip and direct_port:
+                                ssh_host, ssh_port = public_ip, direct_port
                             price = get_price(inst)
                             if inst_id and ssh_host and ssh_port:
                                 if price < 900:
