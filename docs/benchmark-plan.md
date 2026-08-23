@@ -9,10 +9,12 @@
 - Results: `docs/results/qwen38-5060ti.md`
 - Git tag: `qwen38-5060ti-long-v1`
 
-## Phase B — FRESH MACHINE REPRODUCTION (PENDING)
+## Phase B — FRESH MACHINE REPRODUCTION (SKIPPED 2026-08-23 — user decision, cost)
 Fresh 2×5060 Ti instance → run ONLY PROFILE_5060TI_LONG_KVARN_V1 →
-verify DFlash2/KVarN/pool/200K/needle → smoke test. Reproducible only if
-fresh deployment reaches the expected backend/config.
+verify DFlash2/KVarN/pool/200K/needle → smoke test. **SKIPPED by user
+(ngân sách). Reproducibility NOT yet verified on a fresh machine** — the
+snapshot was verified only on source machine e21220fe5193. Bootstrap
+`vllm-profiles/bootstrap_vllm.sh` is ready for when a fresh instance is rented.
 
 ## Phase C — PERFORMANCE RESEARCH (PENDING)
 Do NOT modify PROFILE_5060TI_LONG_KVARN_V1. Use PROFILE_5060TI_LONG_KVARN_EXPERIMENTAL.
