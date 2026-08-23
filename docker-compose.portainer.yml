@@ -70,6 +70,7 @@ services:
       - API_LLM_SERVER=${API_LLM_SERVER}
       - VAST_PROVIDER_NAME=${VAST_PROVIDER_NAME}
       - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-30}
+      - AUTO_SCALE_ENABLED=${AUTO_SCALE_ENABLED:-true}
       - LANGUAGE_PROMPT=${LANGUAGE_PROMPT:-Always communicate and explain in Vietnamese (Tiếng Việt). Keep code syntax, terminal commands, variable names, and programming technical terms in English.}
     volumes:
       - /home/Docker/CLIProxyAPI/config.yaml:/cpa-config.yaml:rw
@@ -89,6 +90,7 @@ services:
         API_LLM_SERVER = os.getenv("API_LLM_SERVER", "")
         PROVIDER_NAME = os.getenv("VAST_PROVIDER_NAME", "ln.vastai")
         IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
+        AUTO_SCALE_ENABLED = os.getenv("AUTO_SCALE_ENABLED", "true").lower() == "true"
         LANGUAGE_PROMPT = os.getenv("LANGUAGE_PROMPT", "")
         
         last_activity = time.time()
@@ -252,7 +254,7 @@ services:
                         return current_active_node
 
                 # Tất cả đều tắt -> Khởi động máy có giá rẻ nhất (nodes[0])
-                if primary and primary["instance_id"]:
+                if primary and primary["instance_id"] and AUTO_SCALE_ENABLED:
                     print(f"🚀 Cold-starting cheapest instance {primary['instance_id']} (USD {primary['price']}/hr)...", flush=True)
                     await set_instance_state(primary["instance_id"], "running")
                     
@@ -276,8 +278,12 @@ services:
                     if not VAST_API_KEY:
                         continue
                     
-                    # Tự động đồng bộ danh sách máy từ Vast API
-                    await auto_sync_instances_from_vast()
+                    # Khi AUTO_SCALE_ENABLED=false: TẠM NGƯNG auto-scale.
+                    # Chỉ đồng bộ instances.txt để tunnel nhìn thấy máy, KHÔNG start/stop máy.
+                    if not AUTO_SCALE_ENABLED:
+                        print("🛑 AUTO_SCALE_ENABLED=false — auto start/stop TẠM NGƯNG (chỉ sync instances.txt)", flush=True)
+                        await auto_sync_instances_from_vast()
+                        continue
 
                     if active_requests > 0:
                         continue
