@@ -39,11 +39,21 @@ echo "📊 Detected Hardware: $GPU_COUNT x $GPU_NAME ($TOTAL_VRAM_MB MB VRAM per
 
 # 2. Compute Optimal Parameters
 TP_SIZE=$GPU_COUNT
+TOTAL_RAM_MB=$(free -m | awk '/^Mem:/ {print $2}' || echo "65536")
 if [ "$TOTAL_VRAM_MB" -ge 22000 ]; then
     # 24GB+ GPUs (RTX 3090, 4090, A5000)
     MEM_FRACTION="0.90"
     DRAFT_TOKENS="8"
-    HICACHE_RATIO="4.0"
+    # HiCache ratio theo RAM hệ thống (máy 62GB như Vast không chạy nổi 4.0 -> OOM host memory)
+    if [ "$TOTAL_RAM_MB" -ge 131072 ]; then
+        HICACHE_RATIO="4.0"
+    elif [ "$TOTAL_RAM_MB" -ge 98304 ]; then
+        HICACHE_RATIO="3.5"
+    elif [ "$TOTAL_RAM_MB" -ge 65536 ]; then
+        HICACHE_RATIO="3.0"
+    else
+        HICACHE_RATIO="2.0"
+    fi
 else
     # 16GB GPUs (RTX 5060 Ti, 4080 16GB, RTX 4000)
     MEM_FRACTION="0.86"
@@ -51,7 +61,7 @@ else
     HICACHE_RATIO="3.0"
 fi
 
-echo "⚙️ Tuned Parameters: TP=$TP_SIZE | mem-fraction-static=$MEM_FRACTION | draft-tokens=$DRAFT_TOKENS | hicache-ratio=$HICACHE_RATIO"
+echo "⚙️ Tuned Parameters: TP=$TP_SIZE | mem-fraction-static=$MEM_FRACTION | draft-tokens=$DRAFT_TOKENS | hicache-ratio=$HICACHE_RATIO | RAM=${TOTAL_RAM_MB}MB"
 
 # 3. Ensure Models Directory Exists
 mkdir -p /root/models
