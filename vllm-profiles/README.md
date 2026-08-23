@@ -35,11 +35,23 @@ apply 13 patches → KVarN → tải Frozenlock + DFlash2 W4A16 → launch → v
 - `2× RTX 5060 Ti (≥16GB)` → **PROFILE_5060TI_LONG_KVARN_V1** (KVarN)
 - khác → STOP, không silent fallback
 
-Log: `/workspace/bootstrap_vllm.log` · Server: `:18020` (OpenAI-compatible, model `qwen3.8-27b`).
+Log: `/workspace/bootstrap_vllm.log` · Server: `:18000` (OpenAI-compatible, model `qwen3.8-27b`).
 
 > ⚠️ PROFILE_3090_ULTRAFAST là reference từ playbook §8.3 (máy F), chưa re-verify
 > qua bootstrap này trên máy mới. PROFILE_5060TI_LONG_KVARN_V1 verified trên
 > e21220fe5193; fresh-machine reproduction CHƯA thực hiện (Phase B skipped).
+
+## Vast-tunnel / CPA integration (2026-08-23)
+- **Deployment port = 18000** (tunnel `vast-tunnel` luôn forward tới `node:18000`).
+  Profile V1 frozen ghi PORT=18020 — deployment dùng 18000, chỉ khác port, không
+  đụng performance config. Khi chạy qua supervisor (máy đang bật), server tự lên
+  lại sau stop/start/reboot (supervisor service `vllm` → `/workspace/start_supervised.sh`).
+- Gateway leader: vast-gateway chọn leader theo **giá rẻ nhất** — máy vLLM 5060 Ti
+  ($0.1887/h) rẻ hơn G ($0.2296) → nếu nằm trong instances.txt auto-sync, nó sẽ
+  thành leader và đá G. **Quyết định routing là của user** (xem playbook §8.4).
+- CPA: chỉ cần provider trỏ `http://vast-gateway:18000/v1` (leader) HOẶC provider
+  riêng trỏ thẳng `http://vast-tunnel:180XX/v1` (máy vLLM — port phụ thuộc thứ tự
+  instances.txt, hiện tại rẻ nhất → 18001).
 
 ## Manual (nếu không dùng template)
 ```bash

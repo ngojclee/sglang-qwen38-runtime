@@ -118,7 +118,7 @@ ln -sf "$PY" "$REPO/venv/bin/python3"
 say "=== LAUNCH [$PROFILE] ==="
 if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
   export MODEL DRAFT
-  export SPEC=dflash2 CTX=huge PREFIX_CACHE=1 PORT=18020
+  export SPEC=dflash2 CTX=huge PREFIX_CACHE=1 PORT=18000
   export GPU_UTIL=0.90 DFLASH_MAX_LEN=262144 CUDAGRAPH_MODE=PIECEWISE
   export KV_MEM=3300000000 VLLM_V2_CUDAGRAPH_MEM_MIB=800
   export EXTRA_ARGS="--tensor-parallel-size 2"
@@ -135,7 +135,7 @@ elif [ "$PROFILE" = "PROFILE_3090_ULTRAFAST" ]; then
     --max-num-batched-tokens 16384 --max-num-seqs 8 \
     --mamba-ssm-cache-dtype float16 --reasoning-parser qwen3 \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder \
-    --served-model-name qwen3.8-27b --host 0.0.0.0 --port 18020 \
+    --served-model-name qwen3.8-27b --host 0.0.0.0 --port 18000 \
     --speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":7}" \
     >/dev/null 2>&1 < /dev/null &
 fi
@@ -148,7 +148,7 @@ say "=== POST-LAUNCH CHECKS (waiting for boot) ==="
 BOOTED=0
 for i in $(seq 1 60); do
   sleep 10
-  if curl -sf -o /dev/null http://127.0.0.1:18020/health; then BOOTED=1; break; fi
+  if curl -sf -o /dev/null http://127.0.0.1:18000/health; then BOOTED=1; break; fi
   if ! kill -0 $SRV 2>/dev/null; then break; fi
 done
 [ "$BOOTED" = "1" ] || die "server did not become healthy (see $LOG)"
@@ -159,4 +159,4 @@ if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
 fi
 POOL=$(grep -oE "GPU KV cache size: [0-9,]+ tokens" "$LOG" | tail -1)
 say "pool: $POOL"
-say "bootstrap_vllm.sh: OK — [$PROFILE] live on :18020"
+say "bootstrap_vllm.sh: OK — [$PROFILE] live on :18000"
