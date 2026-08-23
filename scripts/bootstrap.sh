@@ -68,6 +68,17 @@ echo "⚙️ Tuned Parameters: TP=$TP_SIZE | mem-fraction-static=$MEM_FRACTION |
 # 3. Ensure Models Directory Exists
 mkdir -p /root/models
 
+# 3b. TUNNEL-READY — vast-tunnel pubkey (idempotent, máy mới tự nối được)
+# vast-tunnel (CT101) SSH ra máy theo instances.txt; máy cần chứa pubkey tunnel.
+# (Option A hiện tại: tunnel chạy bằng key deploy đã có sẵn qua Vast — bước này
+#  giữ chân cho trường hợp dùng key tunnel riêng Option B.)
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+TUNNEL_PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGh+qB9P1tXTnGs1gUpXRxeNH7gkDUy+7GegJUCAyCmE vast-tunnel"
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+grep -qF "$TUNNEL_PUB" /root/.ssh/authorized_keys || printf '%s\n' "$TUNNEL_PUB" >> /root/.ssh/authorized_keys
+echo "🔑 Tunnel-ready: $(grep -c '^ssh-ed25519' /root/.ssh/authorized_keys) keys in authorized_keys"
+
+
 # 4. Download / Link Models if not present
 BASE_MODEL_PATH="/root/models/hotdogs-Qwen3.8-27B-AWQ-INT4"
 DFLASH_MODEL_PATH="/root/models/Qwen3.8-27B-DFlash2"
