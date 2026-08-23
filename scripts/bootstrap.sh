@@ -41,9 +41,10 @@ echo "📊 Detected Hardware: $GPU_COUNT x $GPU_NAME ($TOTAL_VRAM_MB MB VRAM per
 TP_SIZE=$GPU_COUNT
 TOTAL_RAM_MB=$(free -m | awk '/^Mem:/ {print $2}' || echo "65536")
 if [ "$TOTAL_VRAM_MB" -ge 22000 ]; then
-    # 24GB+ GPUs (RTX 3090, 4090, A5000)
+    # ===== PROFILE 2x3090 24GB (TP=2, DFlash2 draft 8) =====
     MEM_FRACTION="0.90"
     DRAFT_TOKENS="8"
+    MAX_RUNNING_REQUESTS="4"
     # HiCache ratio theo RAM hệ thống (máy 62GB như Vast không chạy nổi 4.0 -> OOM host memory)
     if [ "$TOTAL_RAM_MB" -ge 131072 ]; then
         HICACHE_RATIO="4.0"
@@ -55,13 +56,14 @@ if [ "$TOTAL_VRAM_MB" -ge 22000 ]; then
         HICACHE_RATIO="2.0"
     fi
 else
-    # 16GB GPUs (RTX 5060 Ti, 4080 16GB, RTX 4000)
-    MEM_FRACTION="0.86"
+    # ===== PROFILE 2x5060 Ti 16GB (TP=2, DFlash2 draft 6, ưu tiên ≥200K context) =====
+    MEM_FRACTION="0.90"
     DRAFT_TOKENS="6"
     HICACHE_RATIO="3.0"
+    MAX_RUNNING_REQUESTS="2"
 fi
 
-echo "⚙️ Tuned Parameters: TP=$TP_SIZE | mem-fraction-static=$MEM_FRACTION | draft-tokens=$DRAFT_TOKENS | hicache-ratio=$HICACHE_RATIO | RAM=${TOTAL_RAM_MB}MB"
+echo "⚙️ Tuned Parameters: TP=$TP_SIZE | mem-fraction-static=$MEM_FRACTION | draft-tokens=$DRAFT_TOKENS | hicache-ratio=$HICACHE_RATIO | max-running-requests=$MAX_RUNNING_REQUESTS | RAM=${TOTAL_RAM_MB}MB"
 
 # 3. Ensure Models Directory Exists
 mkdir -p /root/models
@@ -130,7 +132,7 @@ if [ -n "$AUTH_API_KEY" ]; then
 fi
 
 cat <<EOF > /etc/sglang-args.conf
---tensor-parallel-size $TP_SIZE --speculative-algorithm DFLASH --speculative-draft-model-path $DFLASH_MODEL_PATH --speculative-num-draft-tokens $DRAFT_TOKENS --speculative-draft-model-quantization unquant --kv-cache-dtype fp8_e4m3 --quantization compressed-tensors --trust-remote-code --served-model-name Qwen3.8-27B-Uncensored --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-strict-thinking --mem-fraction-static $MEM_FRACTION --context-length 262144 --allow-auto-truncate --enable-cache-report --chunked-prefill-size 2048 --max-prefill-tokens 16384 --disable-custom-all-reduce --max-running-requests 4 --linear-attn-backend triton --enable-hierarchical-cache --hicache-ratio $HICACHE_RATIO --hicache-write-policy write_through --hicache-io-backend kernel --hicache-mem-layout page_first --host 127.0.0.1 --port 18000 $AUTH_FLAG
+--tensor-parallel-size $TP_SIZE --speculative-algorithm DFLASH --speculative-draft-model-path $DFLASH_MODEL_PATH --speculative-num-draft-tokens $DRAFT_TOKENS --speculative-draft-model-quantization unquant --kv-cache-dtype fp8_e4m3 --quantization compressed-tensors --trust-remote-code --served-model-name Qwen3.8-27B-Uncensored --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-strict-thinking --mem-fraction-static $MEM_FRACTION --context-length 262144 --allow-auto-truncate --enable-cache-report --chunked-prefill-size 2048 --max-prefill-tokens 16384 --disable-custom-all-reduce --max-running-requests $MAX_RUNNING_REQUESTS --linear-attn-backend triton --enable-hierarchical-cache --hicache-ratio $HICACHE_RATIO --hicache-write-policy write_through --hicache-io-backend kernel --hicache-mem-layout page_first --host 127.0.0.1 --port 18000 $AUTH_FLAG
 EOF
 
 echo "✅ Saved /etc/sglang-args.conf"
