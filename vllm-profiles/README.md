@@ -35,7 +35,7 @@ apply 13 patches → KVarN → tải Frozenlock + DFlash2 W4A16 → launch → v
 - `2× RTX 5060 Ti (≥16GB)` → **PROFILE_5060TI_LONG_KVARN_V1** (KVarN)
 - khác → STOP, không silent fallback
 
-Log: `/workspace/bootstrap_vllm.log` · Server: `:18000` (OpenAI-compatible, model `qwen3.8-27b`).
+Log: `/workspace/bootstrap_vllm.log` · Server: `:18000` (OpenAI-compatible, model `Qwen3.8-27B-Uncensored` — khớp CPA provider `ln.vastai` + Codex model_catalog, override qua `EXTRA_ARGS`).
 
 > ⚠️ PROFILE_3090_ULTRAFAST là reference từ playbook §8.3 (máy F), chưa re-verify
 > qua bootstrap này trên máy mới. PROFILE_5060TI_LONG_KVARN_V1 verified trên
@@ -52,6 +52,9 @@ Log: `/workspace/bootstrap_vllm.log` · Server: `:18000` (OpenAI-compatible, mod
 - CPA: chỉ cần provider trỏ `http://vast-gateway:18000/v1` (leader) HOẶC provider
   riêng trỏ thẳng `http://vast-tunnel:180XX/v1` (máy vLLM — port phụ thuộc thứ tự
   instances.txt, hiện tại rẻ nhất → 18001).
+- **Tunnel-ready**: bootstrap tự append pubkey `vast-tunnel` vào
+  `/root/.ssh/authorized_keys` (idempotent, PHASE 2b) → máy mới không cần thêm key
+  tay, vast-tunnel CT101 SSH vào được ngay (cần private key CT101 khớp — xem playbook).
 
 ## Manual (nếu không dùng template)
 ```bash

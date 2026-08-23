@@ -70,6 +70,17 @@ VER=$($PY -c "import vllm; print(vllm.__version__)" 2>/dev/null)
 $PY -m pip install -q pyarrow 2>/dev/null || true
 
 # ---------------------------------------------------------------
+# PHASE 2b — TUNNEL-READY (vast-tunnel pubkey, idempotent)
+# ---------------------------------------------------------------
+say "=== tunnel-ready: vast-tunnel pubkey ==="
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+TUNNEL_PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGh+qB9P1tXTnGs1gUpXRxeNH7gkDUy+7GegJUCAyCmE vast-tunnel"
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+grep -qF "$TUNNEL_PUB" /root/.ssh/authorized_keys || printf '%s\n' "$TUNNEL_PUB" >> /root/.ssh/authorized_keys
+say "authorized_keys ssh-ed25519 entries: $(grep -c '^ssh-ed25519' /root/.ssh/authorized_keys)"
+
+
+# ---------------------------------------------------------------
 # PHASE 3 — SYV-AI REPO + PATCHES + KVARN
 # ---------------------------------------------------------------
 say "=== syv-ai repo ==="
@@ -121,7 +132,7 @@ if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
   export SPEC=dflash2 CTX=huge PREFIX_CACHE=1 PORT=18000
   export GPU_UTIL=0.90 DFLASH_MAX_LEN=262144 CUDAGRAPH_MODE=PIECEWISE
   export KV_MEM=3300000000 VLLM_V2_CUDAGRAPH_MEM_MIB=800
-  export EXTRA_ARGS="--tensor-parallel-size 2"
+  export EXTRA_ARGS="--tensor-parallel-size 2 --served-model-name Qwen3.8-27B-Uncensored"
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   setsid nohup bash single-user/start_qwen.sh >/dev/null 2>&1 < /dev/null &
 elif [ "$PROFILE" = "PROFILE_3090_ULTRAFAST" ]; then
@@ -135,7 +146,7 @@ elif [ "$PROFILE" = "PROFILE_3090_ULTRAFAST" ]; then
     --max-num-batched-tokens 16384 --max-num-seqs 8 \
     --mamba-ssm-cache-dtype float16 --reasoning-parser qwen3 \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder \
-    --served-model-name qwen3.8-27b --host 0.0.0.0 --port 18000 \
+    --served-model-name Qwen3.8-27B-Uncensored --host 0.0.0.0 --port 18000 \
     --speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":7}" \
     >/dev/null 2>&1 < /dev/null &
 fi
