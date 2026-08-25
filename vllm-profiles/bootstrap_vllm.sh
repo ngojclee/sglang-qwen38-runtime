@@ -164,12 +164,15 @@ if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
 elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090_TP1" ]; then
   # 1×3090 worker INT4 (máy K 25/08): AWQ W4A16 + Marlin — xem PROFILE_QWEN38_9B_DISTILL_3090_TP1.conf
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  API_KEY_FLAG=""
+  [ -f /root/vllm_api_key ] && API_KEY_FLAG="--api-key $(cat /root/vllm_api_key)"
   setsid nohup "$REPO/venv/bin/vllm" serve "$MODEL" \
     --max-model-len 262144 \
     --kv-cache-dtype bfloat16 --attention-backend FLASH_ATTN \
     --tensor-parallel-size 1 --gpu-memory-utilization 0.95 \
     --max-num-batched-tokens 16384 --max-num-seqs 8 \
     --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    $API_KEY_FLAG \
     --served-model-name Qwen3.8-9B-Distill --host 0.0.0.0 --port 18000 \
     >/dev/null 2>&1 < /dev/null &
 elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
