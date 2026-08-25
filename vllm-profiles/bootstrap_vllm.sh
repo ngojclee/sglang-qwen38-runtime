@@ -8,7 +8,8 @@
 #
 # GPU detection -> strict profile select -> full setup -> launch -> verify
 #   PROFILE_3090_ULTRAFAST          : 2x RTX 3090 >=24GB (27B Frozenlock BF16/FLASH_ATTN + DFlash2) — DEFAULT
-#   PROFILE_QWEN38_9B_DISTILL_3090  : 2x RTX 3090 >=24GB + MODEL_VERSION=9b (9B-Distill BF16 native)
+#   PROFILE_QWEN38_9B_DISTILL_3090  : 2x RTX 3090 >=24GB + MODEL_VERSION=9b (9B-Distill BF16 native TP2)
+#   PROFILE_QWEN38_9B_DISTILL_3090_TP1 : 1x RTX 3090 >=24GB + MODEL_VERSION=9b (9B-Distill AWQ INT4 TP1)
 #   PROFILE_5060TI_LONG_KVARN_V1    : 2x RTX 5060 Ti >=16GB (KVarN, frozen snapshot)
 #   anything else                   : STOP — no silent fallback
 #
@@ -47,6 +48,11 @@ if [ "$GPU_COUNT" = "2" ]; then
         if [ "$MODEL_VERSION" = "9b" ]; then PROFILE=PROFILE_QWEN38_9B_DISTILL_3090; else PROFILE=PROFILE_3090_ULTRAFAST; fi
       } ;;
     *"RTX 5060 Ti"*)  [ "${GPU_VRAM:-0}" -ge 16000 ] && PROFILE=PROFILE_5060TI_LONG_KVARN_V1 ;;
+  esac
+elif [ "$GPU_COUNT" = "1" ]; then
+  case "$GPU_NAMES" in
+    *"RTX 3090"*)
+      [ "${GPU_VRAM:-0}" -ge 24000 ] && [ "$MODEL_VERSION" = "9b" ] && PROFILE=PROFILE_QWEN38_9B_DISTILL_3090_TP1 ;;
   esac
 fi
 [ -n "$PROFILE" ] || die "Unsupported GPU configuration. No automatic profile selected."
@@ -110,7 +116,13 @@ PY=$PY bash kvarn/install.sh >/dev/null 2>&1 || die "kvarn install failed"
 # ---------------------------------------------------------------
 # PHASE 4 — MODEL + DRAFTER DOWNLOAD
 # ---------------------------------------------------------------
-if [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
+if [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090_TP1" ]; then
+  say "=== model download (Qwen3.8-9B-Distill AWQ-W4A16, ~8GB INT4) ==="
+  MODEL=$REPO/models/Qwen3.8-9B-Distill-AWQ-W4A16
+  if [ ! -f "$MODEL/config.json" ]; then
+    hf download Sohailhosseini/Qwen3.8-9B-Distill-AWQ-W4A16 --local-dir "$MODEL" || die "9B AWQ download failed"
+  fi
+elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
   say "=== model download (Qwen3.8-9B-Distill, ~19GB BF16) ==="
   MODEL=$REPO/models/Qwen3.8-9B-Distill
   if [ ! -f "$MODEL/config.json" ]; then
@@ -149,6 +161,17 @@ if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
   export EXTRA_ARGS="--tensor-parallel-size 2 --served-model-name Qwen3.8-27B-Uncensored"
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   setsid nohup bash single-user/start_qwen.sh >/dev/null 2>&1 < /dev/null &
+elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090_TP1" ]; then
+  # 1×3090 worker INT4 (máy K 25/08): AWQ W4A16 + Marlin — xem PROFILE_QWEN38_9B_DISTILL_3090_TP1.conf
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  setsid nohup "$REPO/venv/bin/vllm" serve "$MODEL" \
+    --max-model-len 262144 \
+    --kv-cache-dtype bfloat16 --attention-backend FLASH_ATTN \
+    --tensor-parallel-size 1 --gpu-memory-utilization 0.95 \
+    --max-num-batched-tokens 16384 --max-num-seqs 8 \
+    --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --served-model-name Qwen3.8-9B-Distill --host 0.0.0.0 --port 18000 \
+    >/dev/null 2>&1 < /dev/null &
 elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
   # Research winner (J 25/08): BF16 native, no spec — xem PROFILE_QWEN38_9B_DISTILL_3090.conf
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -188,7 +211,10 @@ for i in $(seq 1 60); do
   if ! kill -0 $SRV 2>/dev/null; then break; fi
 done
 [ "$BOOTED" = "1" ] || die "server did not become healthy (see $LOG)"
-if [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
+if [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090_TP1" ]; then
+  grep -q "MarlinLinearKernel" "$LOG" || die "Marlin kernel NOT active (INT4 fallback?)"
+  grep -q "Qwen3.8-9B-Distill" "$LOG" || die "9B-Distill served model NOT found"
+elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
   grep -q "Qwen3.8-9B-Distill" "$LOG" || die "9B-Distill served model NOT found"
 else
   grep -q "Resolved architecture: DFlash2DraftModel" "$LOG" || die "DFlash2DraftModel NOT resolved"
