@@ -7,10 +7,12 @@
 #   bash <(curl -sL https://raw.githubusercontent.com/ngojclee/sglang-qwen38-runtime/main/vllm-profiles/bootstrap_vllm.sh)
 #
 # GPU detection -> strict profile select -> full setup -> launch -> verify
-#   PROFILE_3090_ULTRAFAST        : 2x RTX 3090 >=24GB (BF16/FLASH_ATTN, ref playbook 8.3)
-#   PROFILE_5060TI_LONG_KVARN_V1  : 2x RTX 5060 Ti >=16GB (KVarN, frozen snapshot)
-#   anything else                 : STOP — no silent fallback
+#   PROFILE_3090_ULTRAFAST          : 2x RTX 3090 >=24GB (27B Frozenlock BF16/FLASH_ATTN + DFlash2) — DEFAULT
+#   PROFILE_QWEN38_9B_DISTILL_3090  : 2x RTX 3090 >=24GB + MODEL_VERSION=9b (9B-Distill BF16 native)
+#   PROFILE_5060TI_LONG_KVARN_V1    : 2x RTX 5060 Ti >=16GB (KVarN, frozen snapshot)
+#   anything else                   : STOP — no silent fallback
 #
+# MODEL_VERSION: 27b (default) | 9b — chọn model tải + launch (9B = empero-ai/Qwen3.8-9B-Distill)
 # Log: /workspace/bootstrap_vllm.log
 # ============================================================================
 set -u
@@ -37,9 +39,13 @@ GPU_PCIE_W=$(nvidia-smi --query-gpu=pcie.link.width.current --format=csv,noheade
 say "count=$GPU_COUNT names=$GPU_NAMES vram=${GPU_VRAM}MiB cc=$GPU_CC pcie=gen${GPU_PCIE_GEN}x${GPU_PCIE_W}"
 
 PROFILE=""
+MODEL_VERSION=${MODEL_VERSION:-27b}
 if [ "$GPU_COUNT" = "2" ]; then
   case "$GPU_NAMES" in
-    *"RTX 3090"*)     [ "${GPU_VRAM:-0}" -ge 24000 ] && PROFILE=PROFILE_3090_ULTRAFAST ;;
+    *"RTX 3090"*)
+      [ "${GPU_VRAM:-0}" -ge 24000 ] && {
+        if [ "$MODEL_VERSION" = "9b" ]; then PROFILE=PROFILE_QWEN38_9B_DISTILL_3090; else PROFILE=PROFILE_3090_ULTRAFAST; fi
+      } ;;
     *"RTX 5060 Ti"*)  [ "${GPU_VRAM:-0}" -ge 16000 ] && PROFILE=PROFILE_5060TI_LONG_KVARN_V1 ;;
   esac
 fi
@@ -104,18 +110,26 @@ PY=$PY bash kvarn/install.sh >/dev/null 2>&1 || die "kvarn install failed"
 # ---------------------------------------------------------------
 # PHASE 4 — MODEL + DRAFTER DOWNLOAD
 # ---------------------------------------------------------------
-say "=== model download (Frozenlock, ~19GB) ==="
-MODEL=$REPO/models/Qwen3.8-27B-int4-AutoRound
-if [ ! -f "$MODEL/config.json" ]; then
-  hf download Frozenlock/Qwen3.8-27B-int4-AutoRound --local-dir "$MODEL" || die "model download failed"
+if [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
+  say "=== model download (Qwen3.8-9B-Distill, ~19GB BF16) ==="
+  MODEL=$REPO/models/Qwen3.8-9B-Distill
+  if [ ! -f "$MODEL/config.json" ]; then
+    hf download empero-ai/Qwen3.8-9B-Distill --local-dir "$MODEL" || die "9B model download failed"
+  fi
+else
+  say "=== model download (Frozenlock, ~19GB) ==="
+  MODEL=$REPO/models/Qwen3.8-27B-int4-AutoRound
+  if [ ! -f "$MODEL/config.json" ]; then
+    hf download Frozenlock/Qwen3.8-27B-int4-AutoRound --local-dir "$MODEL" || die "model download failed"
+  fi
+  say "=== DFlash2 drafter (W4A16) ==="
+  DRAFT=$REPO/models/Qwen3.8-27B-DFlash2-W4A16
+  if [ ! -f "$DRAFT/config.json" ]; then
+    $PY prepare/fetch_dflash2.py || die "drafter fetch failed"
+  fi
+  say "=== draft vocab (MTP head, optional) ==="
+  $PY prepare/build_draft_vocab.py "$MODEL" --ids prepare/draft_vocab_ids.json >/dev/null 2>&1 || true
 fi
-say "=== DFlash2 drafter (W4A16) ==="
-DRAFT=$REPO/models/Qwen3.8-27B-DFlash2-W4A16
-if [ ! -f "$DRAFT/config.json" ]; then
-  $PY prepare/fetch_dflash2.py || die "drafter fetch failed"
-fi
-say "=== draft vocab (MTP head, optional) ==="
-$PY prepare/build_draft_vocab.py "$MODEL" --ids prepare/draft_vocab_ids.json >/dev/null 2>&1 || true
 
 # launcher needs venv/bin symlinks when using system python
 mkdir -p "$REPO/venv/bin"
@@ -135,6 +149,17 @@ if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
   export EXTRA_ARGS="--tensor-parallel-size 2 --served-model-name Qwen3.8-27B-Uncensored"
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   setsid nohup bash single-user/start_qwen.sh >/dev/null 2>&1 < /dev/null &
+elif [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
+  # Research winner (J 25/08): BF16 native, no spec — xem PROFILE_QWEN38_9B_DISTILL_3090.conf
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  setsid nohup "$REPO/venv/bin/vllm" serve "$MODEL" \
+    --max-model-len 262144 \
+    --kv-cache-dtype bfloat16 --attention-backend FLASH_ATTN \
+    --tensor-parallel-size 2 --gpu-memory-utilization 0.90 \
+    --max-num-batched-tokens 16384 --max-num-seqs 8 \
+    --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --served-model-name Qwen3.8-9B-Distill --host 0.0.0.0 --port 18000 \
+    >/dev/null 2>&1 < /dev/null &
 elif [ "$PROFILE" = "PROFILE_3090_ULTRAFAST" ]; then
   # Reference: playbook 8.3 (machine F 2x3090, BF16/FLASH_ATTN, 244 tok/s @176K)
   export VLLM_SPEC_DECODE_ATTN=1 VLLM_USE_FLASHINFER_SAMPLER=0
@@ -163,8 +188,12 @@ for i in $(seq 1 60); do
   if ! kill -0 $SRV 2>/dev/null; then break; fi
 done
 [ "$BOOTED" = "1" ] || die "server did not become healthy (see $LOG)"
-grep -q "Resolved architecture: DFlash2DraftModel" "$LOG" || die "DFlash2DraftModel NOT resolved"
-grep -q "num_speculative_tokens.: 7\|num_spec_tokens=7" "$LOG" || die "SPEC_N != 7"
+if [ "$PROFILE" = "PROFILE_QWEN38_9B_DISTILL_3090" ]; then
+  grep -q "Qwen3.8-9B-Distill" "$LOG" || die "9B-Distill served model NOT found"
+else
+  grep -q "Resolved architecture: DFlash2DraftModel" "$LOG" || die "DFlash2DraftModel NOT resolved"
+  grep -q "num_speculative_tokens.: 7\|num_spec_tokens=7" "$LOG" || die "SPEC_N != 7"
+fi
 if [ "$PROFILE" = "PROFILE_5060TI_LONG_KVARN_V1" ]; then
   grep -q "Using KVARN attention backend" "$LOG" || die "KVarN backend NOT active"
 fi
